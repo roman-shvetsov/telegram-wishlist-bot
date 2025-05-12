@@ -23,62 +23,69 @@ pool = None
 
 async def init_db():
     global pool
-    pool = await asyncpg.create_pool(DATABASE_URL)
-    async with pool.acquire() as conn:
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                id BIGINT PRIMARY KEY,
-                username TEXT,
-                first_name TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS wishlist (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
-                link TEXT,
-                title TEXT,
-                price TEXT,
-                domain TEXT,
-                parsed_at TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS friends (
-                user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
-                friend_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
-                PRIMARY KEY (user_id, friend_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS feedback (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
-                username TEXT,
-                text TEXT,
-                created_at TIMESTAMP DEFAULT NOW()
-            );
-
-            CREATE TABLE IF NOT EXISTS friend_requests (
-                id SERIAL PRIMARY KEY,
-                from_user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
-                to_user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
-                status TEXT DEFAULT 'pending',
-                created_at TIMESTAMP DEFAULT NOW(),
-                UNIQUE(from_user_id, to_user_id)
-            );
-            CREATE TABLE IF NOT EXISTS reservations (
-                id SERIAL PRIMARY KEY,
-                gift_id INTEGER REFERENCES wishlist(id) ON DELETE CASCADE,
-                reserved_by BIGINT REFERENCES users(id) ON DELETE CASCADE,
-                reserved_at TIMESTAMP DEFAULT NOW(),
-                UNIQUE(gift_id, reserved_by)
-            );
-            CREATE TABLE IF NOT EXISTS notifications (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
-                message TEXT,
-                created_at TIMESTAMP DEFAULT NOW(),
-                is_read BOOLEAN DEFAULT FALSE
-            );
-        ''')
+    try:
+        print(f"Попытка подключения к базе данных: {DATABASE_URL}")
+        pool = await asyncpg.create_pool(DATABASE_URL)
+        print("Подключение к базе данных успешно!")
+        pool = await asyncpg.create_pool(DATABASE_URL)
+        async with pool.acquire() as conn:
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    id BIGINT PRIMARY KEY,
+                    username TEXT,
+                    first_name TEXT
+                );
+    
+                CREATE TABLE IF NOT EXISTS wishlist (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                    link TEXT,
+                    title TEXT,
+                    price TEXT,
+                    domain TEXT,
+                    parsed_at TIMESTAMP
+                );
+    
+                CREATE TABLE IF NOT EXISTS friends (
+                    user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                    friend_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                    PRIMARY KEY (user_id, friend_id)
+                );
+    
+                CREATE TABLE IF NOT EXISTS feedback (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                    username TEXT,
+                    text TEXT,
+                    created_at TIMESTAMP DEFAULT NOW()
+                );
+    
+                CREATE TABLE IF NOT EXISTS friend_requests (
+                    id SERIAL PRIMARY KEY,
+                    from_user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                    to_user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                    status TEXT DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(from_user_id, to_user_id)
+                );
+                CREATE TABLE IF NOT EXISTS reservations (
+                    id SERIAL PRIMARY KEY,
+                    gift_id INTEGER REFERENCES wishlist(id) ON DELETE CASCADE,
+                    reserved_by BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                    reserved_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(gift_id, reserved_by)
+                );
+                CREATE TABLE IF NOT EXISTS notifications (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                    message TEXT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    is_read BOOLEAN DEFAULT FALSE
+                );
+            ''')
+    except Exception as e:
+        print(f"Ошибка подключения к базе данных: {e}")
+        raise
 
 
 def get_pool():

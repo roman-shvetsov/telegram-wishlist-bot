@@ -1,16 +1,14 @@
-import asyncio
-from db import connect
+import asyncpg
+import os
+from dotenv import load_dotenv
 
+load_dotenv()
 
 async def test_connection():
-    try:
-        pool = await connect()
-        async with pool.acquire() as conn:
-            result = await conn.fetch("SELECT 1;")
-            print("✅ Соединение с базой данных установлено!")
-            print("Результат запроса:", result)
-    except Exception as e:
-        print("❌ Ошибка при подключении к базе:", e)
+    # Получаем DATABASE_URL из переменной окружения
+    conn = await asyncpg.connect(os.getenv("NEW_DATABASE_URL"))
+    print("Подключение успешно!")
+    await conn.close()
 
-if __name__ == "__main__":
-    asyncio.run(test_connection())
+import asyncio
+asyncio.run(test_connection())
