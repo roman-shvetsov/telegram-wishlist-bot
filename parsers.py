@@ -7,46 +7,60 @@ from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
-import random
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+import logging
+from cachetools import TTLCache
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Кэш для результатов парсинга (хранит результаты 1 час)
+cache = TTLCache(maxsize=100, ttl=3600)
+
+# Семафор для ограничения одновременных парсингов
+semaphore = asyncio.Semaphore(2)  # Ограничиваем до 2 одновременных парсингов
 
 
 async def parse_product_info(url: str) -> Optional[Tuple[str, str, str]]:
     """Определяет тип сайта и вызывает соответствующий парсер"""
-    domain = urlparse(url).netloc.lower()
+    # Проверяем кэш
+    if url in cache:
+        logger.info(f"Используем кэшированный результат для {url}")
+        return cache[url]
 
-    try:
-        if 'megamarket.ru' in domain:
-            return await parse_megamarket(url)
-        elif 'avito.ru' in domain:
-            return await parse_avito(url)
-        elif 'ozon.ru' in domain:
-            return await parse_ozon(url)
-        elif 'wildberries.ru' in domain:
-            return await parse_wildberries(url)
-        elif 'market.yandex.ru' in domain:
-            return await parse_yandex_market(url)
-        else:
-            return await parse_generic(url)
-    except Exception as e:
-        print(f"Ошибка в parse_product_info: {e}")
-        return None
+    async with semaphore:
+        domain = urlparse(url).netloc.lower()
+        try:
+            if 'megamarket.ru' in domain:
+                result = await parse_megamarket(url)
+            elif 'avito.ru' in domain:
+                result = await parse_avito(url)
+            elif 'ozon.ru' in domain:
+                result = await parse_ozon(url)
+            elif 'wildberries.ru' in domain:
+                result = await parse_wildberries(url)
+            elif 'market.yandex.ru' in domain:
+                result = await parse_yandex_market(url)
+            else:
+                result = await parse_generic(url)
+
+            # Сохраняем в кэш
+            if result:
+                cache[url] = result
+            return result
+        except Exception as e:
+            logger.error(f"Ошибка в parse_product_info: {e}")
+            return None
 
 
 async def parse_ozon(url: str) -> Tuple[str, str, str]:
-    """Асинхронный парсинг Ozon на основе проверенного метода"""
+    logger.info(f"Парсинг Ozon: {url}")
     options = webdriver.ChromeOptions()
-
-    # Критически важные настройки
     options.add_argument("--headless")
     options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--start-maximized")
-
-    # Для работы в Docker/серверных окружениях
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
 
@@ -55,44 +69,28 @@ async def parse_ozon(url: str) -> Tuple[str, str, str]:
 
     try:
         driver.get(url)
-        await asyncio.sleep(10)  # Асинхронная задержка
-
-        # Сохраняем HTML для отладки (опционально)
-        with open("ozon_page.html", "w", encoding="utf-8") as f:
-            f.write(driver.page_source)
-
-        # Поиск названия
+        await asyncio.sleep(10)
+        title = driver.find_element("xpath", '//h1[contains(@class, "title")]').text
+    except:
         try:
-            title = driver.find_element("xpath", '//h1[contains(@class, "title")]').text
+            title = driver.find_element("xpath", '//h1').text
         except:
-            try:
-                title = driver.find_element("xpath", '//h1').text
-            except:
-                title = "Название не найдено"
+            title = "Название не найдено"
 
-        # Поиск цены с улучшенной логикой
-        price = "Цена не найдена"
-        try:
-            # Сначала ищем основной элемент цены
-            price_elements = driver.find_elements("xpath", '//*[contains(text(), "₽")]')
-
-            # Выбираем самый вероятный элемент цены (с цифрами)
-            for elem in price_elements:
-                text = elem.text
-                if any(c.isdigit() for c in text):
-                    price = re.sub(r'[^\d₽,. ]', '', text).strip()
-                    break
-        except Exception as e:
-            print(f"Ошибка при поиске цены: {e}")
-
-        print(f"Успешно распарсено: {title}, {price}")
-        return title, price, 'ozon.ru'
-
+    price = "Цена не найдена"
+    try:
+        price_elements = driver.find_elements("xpath", '//*[contains(text(), "₽")]')
+        for elem in price_elements:
+            text = elem.text
+            if any(c.isdigit() for c in text):
+                price = re.sub(r'[^\d₽,. ]', '', text).strip()
+                break
     except Exception as e:
-        print(f"Ошибка парсинга Ozon: {e}")
-        return "Ошибка парсинга", "Ошибка парсинга", 'ozon.ru'
-    finally:
-        driver.quit()
+        logger.error(f"Ошибка при поиске цены на Ozon: {e}")
+
+    logger.info(f"Успешно распарсено Ozon: {title}, {price}")
+    driver.quit()
+    return title, price, 'ozon.ru'
 
 
 async def parse_wildberries(url: str) -> Tuple[str, str, str]:

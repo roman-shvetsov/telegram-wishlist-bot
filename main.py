@@ -15,6 +15,7 @@ from telegram.ext import (
     filters
 )
 from telegram.constants import ParseMode
+from telegram.error import TimedOut
 from db import (
     init_db,
     register_user,
@@ -30,7 +31,6 @@ from db import (
     remove_friend,
     get_user_by_id,
     add_feedback,
-    # Новые импорты для функционала бронирования:
     reserve_gift,
     cancel_reservation,
     get_reservation_info,
@@ -39,7 +39,47 @@ from db import (
 )
 from config import TELEGRAM_TOKEN, ADMIN_ID
 import asyncio
+import httpx
+import logging
 
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Кастомный HTTP-клиент с увеличенными таймаутами и повторными попытками
+class CustomHTTPXClient:
+    def __init__(self):
+        limits = httpx.Limits(max_connections=100, max_keepalive_connections=20)
+        timeout = httpx.Timeout(30.0, connect=10.0, read=20.0, write=10.0)
+        self.client = httpx.AsyncClient(
+            limits=limits,
+            timeout=timeout,
+            http2=True
+        )
+
+    async def request(self, method, url, **kwargs):
+        for attempt in range(3):  # 3 попытки
+            try:
+                response = await self.client.request(method, url, **kwargs)
+                return response
+            except httpx.ReadTimeout as e:
+                logger.warning(f"ReadTimeout на попытке {attempt + 1}: {e}")
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(2 ** attempt)  # Экспоненциальная задержка
+            except httpx.HTTPError as e:
+                logger.error(f"HTTPError: {e}")
+                raise
+        return None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.client.aclose()
 
 # Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -62,7 +102,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN
     )
 
-    # Дополнительное сообщение со ссылкой на условия
     await update.message.reply_text(
         "🔍 Подробнее о работе бота: /terms",
         disable_web_page_preview=True
@@ -758,35 +797,42 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
 async def post_init(application):
     await init_db()
 
-
 def main():
-    # Инициализируем Application с JobQueue
-    app = ApplicationBuilder() \
-        .token(TELEGRAM_TOKEN) \
-        .post_init(post_init) \
-        .concurrent_updates(True) \
-        .build()
+    try:
+        # Инициализируем Application с кастомным HTTP-клиентом
+        app = ApplicationBuilder() \
+            .token(TELEGRAM_TOKEN) \
+            .post_init(post_init) \
+            .concurrent_updates(True) \
+            .http_client(CustomHTTPXClient()) \
+            .build()
 
-    # Добавляем обработчики
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("terms", terms))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
-    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handle_media))
-    app.add_handler(CallbackQueryHandler(handle_delete_callback, pattern="^delete:"))
-    app.add_handler(CallbackQueryHandler(handle_friend_callback, pattern="^(show_wishlist|remove_friend|reserve|cancel_reserve):"))
-    app.add_handler(CallbackQueryHandler(handle_friend_request_response, pattern="^friend_request:"))
-    app.add_handler(MessageHandler(filters.StatusUpdate.USER_SHARED, handle_user_shared))
-    app.add_handler(CommandHandler("update_prices", update_prices))
+        # Добавляем обработчики
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("terms", terms))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
+        app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handle_media))
+        app.add_handler(CallbackQueryHandler(handle_delete_callback, pattern="^delete:"))
+        app.add_handler(CallbackQueryHandler(handle_friend_callback, pattern="^(show_wishlist|remove_friend|reserve|cancel_reserve):"))
+        app.add_handler(CallbackQueryHandler(handle_friend_request_response, pattern="^friend_request:"))
+        app.add_handler(MessageHandler(filters.StatusUpdate.USER_SHARED, handle_user_shared))
+        app.add_handler(CommandHandler("update_prices", update_prices))
 
-    # Настраиваем периодическую проверку бронирований
-    app.job_queue.run_repeating(
-        callback=check_reservations_periodically,
-        interval=86400,  # 24 часа
-        first=10  # Первый запуск через 10 секунд
-    )
+        # Настраиваем периодическую проверку бронирований
+        app.job_queue.run_repeating(
+            callback=check_reservations_periodically,
+            interval=86400,  # 24 часа
+            first=10  # Первый запуск через 10 секунд
+        )
 
-    app.run_polling()
-
+        # Запускаем приложение с обработкой исключений
+        logger.info("Запуск бота...")
+        app.run_polling(drop_pending_updates=True)
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {e}")
+        # Даем время на завершение асинхронных задач
+        asyncio.run(asyncio.sleep(5))
+        raise
 
 if __name__ == "__main__":
     main()

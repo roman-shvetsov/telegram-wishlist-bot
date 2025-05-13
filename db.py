@@ -2,14 +2,13 @@ import asyncpg
 import os
 from dotenv import load_dotenv
 import asyncio
+import logging
 
 try:
     from parsers import parse_product_info
 except ImportError:
-    # Для случаев, когда парсеры не доступны
     async def parse_product_info(url): return None
 
-import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -23,69 +22,72 @@ pool = None
 
 async def init_db():
     global pool
-    try:
-        print(f"Попытка подключения к базе данных: {DATABASE_URL}")
-        pool = await asyncpg.create_pool(DATABASE_URL)
-        print("Подключение к базе данных успешно!")
-        pool = await asyncpg.create_pool(DATABASE_URL)
-        async with pool.acquire() as conn:
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    id BIGINT PRIMARY KEY,
-                    username TEXT,
-                    first_name TEXT
-                );
-    
-                CREATE TABLE IF NOT EXISTS wishlist (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
-                    link TEXT,
-                    title TEXT,
-                    price TEXT,
-                    domain TEXT,
-                    parsed_at TIMESTAMP
-                );
-    
-                CREATE TABLE IF NOT EXISTS friends (
-                    user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
-                    friend_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
-                    PRIMARY KEY (user_id, friend_id)
-                );
-    
-                CREATE TABLE IF NOT EXISTS feedback (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
-                    username TEXT,
-                    text TEXT,
-                    created_at TIMESTAMP DEFAULT NOW()
-                );
-    
-                CREATE TABLE IF NOT EXISTS friend_requests (
-                    id SERIAL PRIMARY KEY,
-                    from_user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
-                    to_user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
-                    status TEXT DEFAULT 'pending',
-                    created_at TIMESTAMP DEFAULT NOW(),
-                    UNIQUE(from_user_id, to_user_id)
-                );
-                CREATE TABLE IF NOT EXISTS reservations (
-                    id SERIAL PRIMARY KEY,
-                    gift_id INTEGER REFERENCES wishlist(id) ON DELETE CASCADE,
-                    reserved_by BIGINT REFERENCES users(id) ON DELETE CASCADE,
-                    reserved_at TIMESTAMP DEFAULT NOW(),
-                    UNIQUE(gift_id, reserved_by)
-                );
-                CREATE TABLE IF NOT EXISTS notifications (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
-                    message TEXT,
-                    created_at TIMESTAMP DEFAULT NOW(),
-                    is_read BOOLEAN DEFAULT FALSE
-                );
-            ''')
-    except Exception as e:
-        print(f"Ошибка подключения к базе данных: {e}")
-        raise
+    for attempt in range(3):  # 3 попытки подключения
+        try:
+            logger.info(f"Попытка подключения к базе данных (попытка {attempt + 1}): {DATABASE_URL}")
+            pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
+            logger.info("Подключение к базе данных успешно!")
+            async with pool.acquire() as conn:
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS users (
+                        id BIGINT PRIMARY KEY,
+                        username TEXT,
+                        first_name TEXT
+                    );
+        
+                    CREATE TABLE IF NOT EXISTS wishlist (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                        link TEXT,
+                        title TEXT,
+                        price TEXT,
+                        domain TEXT,
+                        parsed_at TIMESTAMP
+                    );
+        
+                    CREATE TABLE IF NOT EXISTS friends (
+                        user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                        friend_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                        PRIMARY KEY (user_id, friend_id)
+                    );
+        
+                    CREATE TABLE IF NOT EXISTS feedback (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                        username TEXT,
+                        text TEXT,
+                        created_at TIMESTAMP DEFAULT NOW()
+                    );
+        
+                    CREATE TABLE IF NOT EXISTS friend_requests (
+                        id SERIAL PRIMARY KEY,
+                        from_user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                        to_user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                        status TEXT DEFAULT 'pending',
+                        created_at TIMESTAMP DEFAULT NOW(),
+                        UNIQUE(from_user_id, to_user_id)
+                    );
+                    CREATE TABLE IF NOT EXISTS reservations (
+                        id SERIAL PRIMARY KEY,
+                        gift_id INTEGER REFERENCES wishlist(id) ON DELETE CASCADE,
+                        reserved_by BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                        reserved_at TIMESTAMP DEFAULT NOW(),
+                        UNIQUE(gift_id, reserved_by)
+                    );
+                    CREATE TABLE IF NOT EXISTS notifications (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                        message TEXT,
+                        created_at TIMESTAMP DEFAULT NOW(),
+                        is_read BOOLEAN DEFAULT FALSE
+                    );
+                ''')
+            return
+        except Exception as e:
+            logger.error(f"Ошибка подключения к базе данных: {e}")
+            if attempt == 2:
+                raise
+            await asyncio.sleep(2 ** attempt)
 
 
 def get_pool():
