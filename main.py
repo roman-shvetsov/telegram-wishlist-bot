@@ -49,38 +49,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Кастомный HTTP-клиент с увеличенными таймаутами и повторными попытками
-class CustomHTTPXClient:
-    def __init__(self):
-        limits = httpx.Limits(max_connections=100, max_keepalive_connections=20)
-        timeout = httpx.Timeout(30.0, connect=10.0, read=20.0, write=10.0)
-        self.client = httpx.AsyncClient(
-            limits=limits,
-            timeout=timeout,
-            http2=True
-        )
-
-    async def request(self, method, url, **kwargs):
-        for attempt in range(3):  # 3 попытки
-            try:
-                response = await self.client.request(method, url, **kwargs)
-                return response
-            except httpx.ReadTimeout as e:
-                logger.warning(f"ReadTimeout на попытке {attempt + 1}: {e}")
-                if attempt == 2:
-                    raise
-                await asyncio.sleep(2 ** attempt)  # Экспоненциальная задержка
-            except httpx.HTTPError as e:
-                logger.error(f"HTTPError: {e}")
-                raise
-        return None
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.client.aclose()
-
 # Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -106,7 +74,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔍 Подробнее о работе бота: /terms",
         disable_web_page_preview=True
     )
-
 
 async def terms(update: Update, context: ContextTypes.DEFAULT_TYPE):
     terms_text = """
@@ -142,8 +109,6 @@ def main_keyboard():
         ["🗑 Удалить подарок", "📝 Отзыв"]
     ], resize_keyboard=True)
 
-
-# Обработка кнопок
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message.text
 
@@ -158,14 +123,11 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif message == '📝 Отзыв':
         await request_feedback(update, context)
 
-
 async def check_gift_limit(user_id: int) -> bool:
-    """Проверяет, достигнут ли лимит подарков (10 штук)"""
     pool = get_pool()
     async with pool.acquire() as conn:
         count = await conn.fetchval('SELECT COUNT(*) FROM wishlist WHERE user_id = $1', user_id)
         return count >= 15
-
 
 async def show_user_wishlist(update: Update, context: ContextTypes.DEFAULT_TYPE, is_own_list=True):
     user_id = update.effective_user.id
@@ -218,9 +180,7 @@ async def show_user_wishlist(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 disable_web_page_preview=False
             )
 
-
 async def update_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обновляет цены для всех подарков пользователя"""
     user_id = update.effective_user.id
     wishlist = await get_user_wishlist(user_id)
 
@@ -249,10 +209,9 @@ async def update_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 updated_count += 1
         except Exception as e:
-            print(f"Ошибка при обновлении товара {gift['id']}: {e}")
+            logger.error(f"Ошибка при обновлении товара {gift['id']}: {e}")
 
     await msg.edit_text(f"✅ Обновлено {updated_count} из {len(wishlist)} подарков!")
-
 
 async def show_gifts_to_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wishlist = await get_user_wishlist(update.effective_user.id)
@@ -275,7 +234,6 @@ async def show_gifts_to_delete(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode="Markdown"
         )
 
-
 async def add_friend_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = ReplyKeyboardMarkup([
         [KeyboardButton("👤 Выбрать друга", request_user=KeyboardButtonRequestUser(
@@ -291,12 +249,10 @@ async def add_friend_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         reply_markup=keyboard
     )
 
-
 async def handle_user_shared(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_shared = update.message.user_shared
     selected_user_id = user_shared.user_id
 
-    # Проверка на добавление самого себя
     if update.effective_user.id == selected_user_id:
         await update.message.reply_text(
             "Нельзя добавить самого себя в друзья 😊",
@@ -304,13 +260,11 @@ async def handle_user_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    # Проверяем наличие пользователя в базе
     pool = get_pool()
     async with pool.acquire() as conn:
         friend = await conn.fetchrow('SELECT * FROM users WHERE id = $1', selected_user_id)
 
     if not friend:
-        # Формируем приглашение
         invite_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton(
                 "📩 Пригласить друга",
@@ -324,7 +278,6 @@ async def handle_user_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    # Проверяем, не друзья ли уже
     if await check_friendship(update.effective_user.id, selected_user_id):
         await update.message.reply_text(
             "Вы уже друзья с этим пользователем!",
@@ -332,7 +285,6 @@ async def handle_user_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    # Создаем запрос в друзья
     if not await create_friend_request(update.effective_user.id, selected_user_id):
         await update.message.reply_text(
             "Вы уже отправили запрос этому пользователю 😊",
@@ -340,7 +292,6 @@ async def handle_user_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    # Отправляем запрос другу
     request_keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ Принять", callback_data=f"friend_request:accept:{update.effective_user.id}"),
@@ -365,7 +316,6 @@ async def handle_user_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=main_keyboard()
         )
 
-
 async def show_friends_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     friends = await get_friends(update.effective_user.id)
     if not friends:
@@ -388,7 +338,6 @@ async def show_friends_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=keyboard
         )
 
-    # Показываем входящие запросы
     pending_requests = await get_pending_requests(update.effective_user.id)
     if pending_requests:
         await update.message.reply_text("📥 Входящие запросы в друзья:")
@@ -397,7 +346,7 @@ async def show_friends_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [
                     InlineKeyboardButton("✅ Принять", callback_data=f"friend_request:accept:{request['from_user_id']}"),
                     InlineKeyboardButton("❌ Отклонить",
-                                         callback_data=f"friend_request:reject:{request['from_user_id']}")
+                                        callback_data=f"friend_request:reject:{request['from_user_id']}")
                 ]
             ])
 
@@ -406,22 +355,19 @@ async def show_friends_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=keyboard
             )
 
-
 async def handle_friend_request_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    action, from_user_id = query.data.split(":")[1:]  # Здесь action будет 'accept' или 'reject'
+    action, from_user_id = query.data.split(":")[1:]
     from_user_id = int(from_user_id)
     to_user_id = query.from_user.id
 
-    # Обновляем статус запроса
-    success = await update_friend_request(from_user_id, to_user_id, action)  # Передаем action как статус
+    success = await update_friend_request(from_user_id, to_user_id, action)
     if not success:
         await query.edit_message_text("Не удалось найти активный запрос в друзья.")
         return
 
-    # Уведомляем обоих пользователей
     from_user = await get_user_by_id(from_user_id)
     to_user = await get_user_by_id(to_user_id)
 
@@ -442,23 +388,19 @@ async def handle_friend_request_response(update: Update, context: ContextTypes.D
             f"❌ Вы отклонили запрос в друзья от {from_user['first_name']} (@{from_user['username']})"
         )
 
-
-# Добавим периодическую проверку старых бронирований
 async def check_reservations_periodically(context: ContextTypes.DEFAULT_TYPE):
     try:
         count = await check_old_reservations()
         if count > 0:
-            print(f"Автоматически отменено {count} старых бронирований")
+            logger.info(f"Автоматически отменено {count} старых бронирований")
     except Exception as e:
-        print(f"Ошибка при проверке бронирований: {e}")
-
+        logger.error(f"Ошибка при проверке бронирований: {e}")
 
 async def handle_friend_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
     try:
-        # Показать вишлист друга
         if query.data.startswith("show_wishlist:"):
             friend_id = int(query.data.split(":")[1])
             friend = await get_user_by_id(friend_id)
@@ -468,20 +410,17 @@ async def handle_friend_callback(update: Update, context: ContextTypes.DEFAULT_T
                 await query.edit_message_text(f"🎁 У {friend['first_name']} пока нет подарков в списке 😢")
                 return
 
-            # Отправляем заголовок
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
                 text=f"🎁 Список подарков {friend['first_name']}:"
             )
 
-            # Отправляем подарки
             current_user_id = query.from_user.id
             for gift in wishlist:
                 gift_link = gift['link']
                 title = gift.get('title', 'Без названия')
                 price = gift.get('price', 'Цена не указана')
 
-                # Форматируем сообщение как в вашем вишлисте
                 message_text = f"🎁 *{title}*\n"
                 if price != 'Цена не указана':
                     message_text += f"💰 *Цена:* {price}\n"
@@ -510,12 +449,10 @@ async def handle_friend_callback(update: Update, context: ContextTypes.DEFAULT_T
                     disable_web_page_preview=False
                 )
 
-        # Бронирование подарка
         elif query.data.startswith("reserve:"):
             gift_id = int(query.data.split(":")[1])
             user_id = query.from_user.id
 
-            # Получаем полную информацию о подарке
             pool = get_pool()
             async with pool.acquire() as conn:
                 gift_info = await conn.fetchrow(
@@ -526,18 +463,19 @@ async def handle_friend_callback(update: Update, context: ContextTypes.DEFAULT_T
                     gift_id
                 )
 
+            if not gift_info:
+                await query.edit_message_text("Подарок не найден.")
+                return
+
             gift_link = gift_info['link']
             title = gift_info.get('title', 'Без названия')
             price = gift_info.get('price', 'Цена не указана')
 
-            # Проверяем, не пытается ли пользователь забронировать свой подарок
             if gift_info['owner_id'] == user_id:
                 await query.edit_message_text("Нельзя забронировать свой собственный подарок 😊")
                 return
 
-            # Пытаемся забронировать
             if await reserve_gift(gift_id, user_id):
-                # Уведомляем владельца
                 try:
                     message_text = f"🎉 <b>Кто-то хочет подарить вам этот подарок!</b>\n\n"
                     message_text += f"🎁 <b>{title}</b>\n"
@@ -553,9 +491,8 @@ async def handle_friend_callback(update: Update, context: ContextTypes.DEFAULT_T
                         disable_web_page_preview=False
                     )
                 except Exception as e:
-                    print(f"Ошибка при уведомлении владельца: {e}")
+                    logger.error(f"Ошибка при уведомлении владельца: {e}")
 
-                # Обновляем сообщение
                 message_text = f"✅ <b>Вы забронировали этот подарок!</b>\n\n"
                 message_text += f"🎁 <b>{title}</b>\n"
                 if price != 'Цена не указана':
@@ -577,12 +514,10 @@ async def handle_friend_callback(update: Update, context: ContextTypes.DEFAULT_T
                     parse_mode=ParseMode.HTML
                 )
 
-        # Отмена бронирования
         elif query.data.startswith("cancel_reserve:"):
             gift_id = int(query.data.split(":")[1])
             user_id = query.from_user.id
 
-            # Получаем полную информацию о подарке
             pool = get_pool()
             async with pool.acquire() as conn:
                 gift_info = await conn.fetchrow(
@@ -593,13 +528,15 @@ async def handle_friend_callback(update: Update, context: ContextTypes.DEFAULT_T
                     gift_id
                 )
 
+            if not gift_info:
+                await query.edit_message_text("Подарок не найден.")
+                return
+
             gift_link = gift_info['link']
             title = gift_info.get('title', 'Без названия')
             price = gift_info.get('price', 'Цена не указана')
 
-            # Пытаемся отменить бронь
             if await cancel_reservation(gift_id, user_id):
-                # Уведомляем владельца
                 try:
                     message_text = f"😢 <b>Кто-то передумал дарить вам этот подарок</b>\n\n"
                     message_text += f"🎁 <b>{title}</b>\n"
@@ -615,9 +552,8 @@ async def handle_friend_callback(update: Update, context: ContextTypes.DEFAULT_T
                         disable_web_page_preview=False
                     )
                 except Exception as e:
-                    print(f"Ошибка при уведомлении владельца: {e}")
+                    logger.error(f"Ошибка при уведомлении владельца: {e}")
 
-                # Обновляем сообщение
                 message_text = f"❌ <b>Вы отменили бронирование подарка</b>\n\n"
                 message_text += f"🎁 <b>{title}</b>\n"
                 if price != 'Цена не указана':
@@ -638,15 +574,12 @@ async def handle_friend_callback(update: Update, context: ContextTypes.DEFAULT_T
                     parse_mode=ParseMode.HTML
                 )
 
-        # Удаление друга
         elif query.data.startswith("remove_friend:"):
             friend_id = int(query.data.split(":")[1])
             await remove_friend(query.from_user.id, friend_id)
 
-            # Также отменяем все бронирования между этими пользователями
             pool = get_pool()
             async with pool.acquire() as conn:
-                # Находим все подарки пользователя, забронированные другом
                 gifts = await conn.fetch(
                     'SELECT w.id FROM wishlist w '
                     'JOIN reservations r ON w.id = r.gift_id '
@@ -654,7 +587,6 @@ async def handle_friend_callback(update: Update, context: ContextTypes.DEFAULT_T
                     query.from_user.id, friend_id
                 )
 
-                # И наоборот - подарки друга, забронированные пользователем
                 friend_gifts = await conn.fetch(
                     'SELECT w.id FROM wishlist w '
                     'JOIN reservations r ON w.id = r.gift_id '
@@ -662,16 +594,14 @@ async def handle_friend_callback(update: Update, context: ContextTypes.DEFAULT_T
                     friend_id, query.from_user.id
                 )
 
-                # Отменяем все эти бронирования
                 for gift in gifts + friend_gifts:
                     await cancel_reservation(gift['id'], friend_id if gift in gifts else query.from_user.id)
 
             await query.edit_message_text("Друг удалён из списка 💔")
 
     except Exception as e:
-        print(f"Ошибка в handle_friend_callback: {e}")
+        logger.error(f"Ошибка в handle_friend_callback: {e}")
         await query.edit_message_text("Произошла ошибка 😢 Попробуйте позже.")
-
 
 async def handle_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -682,7 +612,6 @@ async def handle_delete_callback(update: Update, context: ContextTypes.DEFAULT_T
         await delete_gift_by_id(gift_id)
         await query.edit_message_text("Подарок удалён ✅")
 
-
 async def request_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Напиши свой отзыв или предложение по улучшению бота. "
@@ -691,7 +620,6 @@ async def request_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=ReplyKeyboardMarkup([["🏠 Главное меню"]], resize_keyboard=True)
     )
     context.user_data['awaiting_feedback'] = True
-
 
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get('awaiting_feedback'):
@@ -706,7 +634,6 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=main_keyboard()
     )
 
-    # Пересылаем админу
     try:
         if update.message.photo:
             photo = update.message.photo[-1].file_id
@@ -722,41 +649,34 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption=f"📄 Отзыв от @{user.username} (id: {user.id}):\n\n{caption}"
             )
         else:
-            # На случай других типов медиа
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
                 text=f"📦 Отзыв от @{user.username} (id: {user.id}):\n\n{caption}"
             )
     except Exception as e:
-        print(f"Ошибка при отправке медиа-отзыва админу: {e}")
+        logger.error(f"Ошибка при отправке медиа-отзыва админу: {e}")
 
     del context.user_data['awaiting_feedback']
-
 
 async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message.text
 
-    # Обработка возврата в главное меню
     if message == '🏠 Главное меню':
-        # Сбрасываем флаг ожидания отзыва, если он был установлен
         if 'awaiting_feedback' in context.user_data:
             del context.user_data['awaiting_feedback']
 
         await update.message.reply_text("Главное меню:", reply_markup=main_keyboard())
         return
 
-    # Обработка отзыва
     if context.user_data.get('awaiting_feedback'):
         user = update.effective_user
         await add_feedback(user.id, user.username, message)
 
-        # Отправляем подтверждение пользователю
         await update.message.reply_text(
             "Спасибо за ваш отзыв! 💖 Мы обязательно его рассмотрим.",
             reply_markup=main_keyboard()
         )
 
-        # Отправляем отзыв админу
         feedback_text = (
             f"📝 Новый отзыв от @{user.username} (id: {user.id}):\n\n"
             f"{message}"
@@ -768,21 +688,15 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
                 text=feedback_text
             )
         except Exception as e:
-            print(f"Ошибка при отправке отзыва админу: {e}")
+            logger.error(f"Ошибка при отправке отзыва админу: {e}")
 
         del context.user_data['awaiting_feedback']
         return
 
-    # Обработка ссылок
     if message.startswith("http"):
-        # Проверяем лимит подарков
         if await check_gift_limit(update.effective_user.id):
             await update.message.reply_text(
                 "🚫 Вы достигли лимита в 15 подарков в вашем списке!",
-                #"Пригласите друзей, чтобы получить возможность добавлять больше подарков:\n"
-                #"1. Нажмите «👫 Добавить друга»\n"
-                #"2. Выберите контакт из списка\n\n"
-                #"За каждого приглашённого друга вы получите +1 к лимиту подарков!",
                 reply_markup=main_keyboard()
             )
             return
@@ -790,24 +704,27 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Подарок добавлен в твой список! 👍")
         return
 
-    # Обработка кнопок
     await handle_buttons(update, context)
-
 
 async def post_init(application):
     await init_db()
 
 def main():
     try:
-        # Инициализируем Application с кастомным HTTP-клиентом
+        # Настройка HTTP-клиента с увеличенными таймаутами
+        request_kwargs = {
+            'timeout': httpx.Timeout(30.0, connect=10.0, read=20.0, write=10.0),
+            'limits': httpx.Limits(max_connections=100, max_keepalive_connections=20),
+            'retries': 3
+        }
+
         app = ApplicationBuilder() \
             .token(TELEGRAM_TOKEN) \
             .post_init(post_init) \
             .concurrent_updates(True) \
-            .http_client(CustomHTTPXClient()) \
+            .request_kwargs(request_kwargs) \
             .build()
 
-        # Добавляем обработчики
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("terms", terms))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
@@ -818,19 +735,16 @@ def main():
         app.add_handler(MessageHandler(filters.StatusUpdate.USER_SHARED, handle_user_shared))
         app.add_handler(CommandHandler("update_prices", update_prices))
 
-        # Настраиваем периодическую проверку бронирований
         app.job_queue.run_repeating(
             callback=check_reservations_periodically,
-            interval=86400,  # 24 часа
-            first=10  # Первый запуск через 10 секунд
+            interval=86400,
+            first=10
         )
 
-        # Запускаем приложение с обработкой исключений
         logger.info("Запуск бота...")
         app.run_polling(drop_pending_updates=True)
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}")
-        # Даем время на завершение асинхронных задач
         asyncio.run(asyncio.sleep(5))
         raise
 
