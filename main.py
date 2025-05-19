@@ -16,6 +16,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 from telegram.error import TimedOut
+from telegram.request import HTTPXRequest
 from db import (
     init_db,
     register_user,
@@ -711,18 +712,20 @@ async def post_init(application):
 
 def main():
     try:
-        # Настройка HTTP-клиента с увеличенными таймаутами
-        request_kwargs = {
-            'timeout': httpx.Timeout(30.0, connect=10.0, read=20.0, write=10.0),
-            'limits': httpx.Limits(max_connections=100, max_keepalive_connections=20),
-            'retries': 3
-        }
+        # Настройка HTTP-запросов с увеличенными таймаутами и повторными попытками
+        http_request = HTTPXRequest(
+            connection_pool_size=100,
+            read_timeout=20.0,
+            write_timeout=10.0,
+            connect_timeout=10.0,
+            pool_timeout=30.0
+        )
 
         app = ApplicationBuilder() \
             .token(TELEGRAM_TOKEN) \
             .post_init(post_init) \
             .concurrent_updates(True) \
-            .request_kwargs(request_kwargs) \
+            .get_updates_request(http_request) \
             .build()
 
         app.add_handler(CommandHandler("start", start))
