@@ -113,6 +113,7 @@ def main_keyboard():
 
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message.text
+    logger.info(f"Received button press: {message} from user {update.effective_user.id}")
 
     if message == '🎁 Мой виш-лист':
         await show_user_wishlist(update, context)
@@ -183,6 +184,7 @@ async def show_user_wishlist(update: Update, context: ContextTypes.DEFAULT_TYPE,
             )
 
 async def update_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Received /update_prices command from user {update.effective_user.id}")
     user_id = update.effective_user.id
     wishlist = await get_user_wishlist(user_id)
 
@@ -252,6 +254,7 @@ async def add_friend_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 async def handle_user_shared(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Received user_shared from user {update.effective_user.id}")
     user_shared = update.message.user_shared
     selected_user_id = user_shared.user_id
 
@@ -360,6 +363,7 @@ async def show_friends_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_friend_request_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    logger.info(f"Received friend request response: {query.data} from user {query.from_user.id}")
 
     action, from_user_id = query.data.split(":")[1:]
     from_user_id = int(from_user_id)
@@ -401,6 +405,7 @@ async def check_reservations_periodically(context: ContextTypes.DEFAULT_TYPE):
 async def handle_friend_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    logger.info(f"Received callback: {query.data} from user {query.from_user.id}")
 
     try:
         if query.data.startswith("show_wishlist:"):
@@ -608,6 +613,7 @@ async def handle_friend_callback(update: Update, context: ContextTypes.DEFAULT_T
 async def handle_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    logger.info(f"Received delete callback: {query.data} from user {query.from_user.id}")
 
     if query.data.startswith("delete:"):
         gift_id = int(query.data.split("delete:")[1])
@@ -615,6 +621,7 @@ async def handle_delete_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("Подарок удалён ✅")
 
 async def request_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Received feedback request from user {update.effective_user.id}")
     await update.message.reply_text(
         "Напиши свой отзыв или предложение по улучшению бота. "
         "Мы ценим каждое мнение! 😊\n\n"
@@ -626,6 +633,7 @@ async def request_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get('awaiting_feedback'):
         return
+    logger.info(f"Received media feedback from user {update.effective_user.id}")
 
     user = update.effective_user
     caption = update.message.caption or "Без описания"
@@ -662,6 +670,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message.text
+    logger.info(f"Received text message: {message} from user {update.effective_user.id}")
 
     if message == '🏠 Главное меню':
         if 'awaiting_feedback' in context.user_data:
@@ -672,6 +681,9 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if context.user_data.get('awaiting_feedback'):
         user = update.effective_user
+        if "http" in message.lower():
+            await update.message.reply_text("Ссылки в отзывах запрещены.", reply_markup=main_keyboard())
+            return
         await add_feedback(user.id, user.username, message)
 
         await update.message.reply_text(
@@ -708,10 +720,22 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await handle_buttons(update, context)
 
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Доступ запрещен.")
+        return
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        users = await conn.fetch("SELECT id FROM users")
+    for user in users:
+        try:
+            await context.bot.send_message(chat_id=user['id'], text=" ".join(context.args))
+        except Exception as e:
+            logger.error(f"Ошибка отправки пользователю {user['id']}: {e}")
+    await update.message.reply_text("Сообщение отправлено всем пользователям!")
 
 async def health_check(request: web.Request):
     return web.Response(text="OK")
-
 
 async def run_health_endpoint():
     web_app = web.Application()
@@ -722,10 +746,8 @@ async def run_health_endpoint():
     await site.start()
     logger.info("Health endpoint started on port 8080")
 
-
 async def post_init(application):
     await init_db()
-
 
 def main():
     try:
@@ -754,6 +776,7 @@ def main():
         app.add_handler(CallbackQueryHandler(handle_friend_request_response, pattern="^friend_request:"))
         app.add_handler(MessageHandler(filters.StatusUpdate.USER_SHARED, handle_user_shared))
         app.add_handler(CommandHandler("update_prices", update_prices))
+        app.add_handler(CommandHandler("broadcast", broadcast))
 
         app.job_queue.run_repeating(
             callback=check_reservations_periodically,
@@ -771,7 +794,6 @@ def main():
         logger.error(f"Критическая ошибка: {e}")
         asyncio.run(asyncio.sleep(5))
         raise
-
 
 if __name__ == "__main__":
     main()
