@@ -42,6 +42,7 @@ from config import TELEGRAM_TOKEN, ADMIN_ID
 import asyncio
 import httpx
 import logging
+from aiohttp import web
 
 # Настройка логирования
 logging.basicConfig(
@@ -707,12 +708,27 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await handle_buttons(update, context)
 
+
+async def health_check(request: web.Request):
+    return web.Response(text="OK")
+
+
+async def run_health_endpoint():
+    web_app = web.Application()
+    web_app.router.add_get('/health', health_check)
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+    logger.info("Health endpoint started on port 8080")
+
+
 async def post_init(application):
     await init_db()
 
+
 def main():
     try:
-        # Настройка HTTP-запросов с увеличенными таймаутами и повторными попытками
         http_request = HTTPXRequest(
             connection_pool_size=100,
             read_timeout=20.0,
@@ -728,6 +744,7 @@ def main():
             .get_updates_request(http_request) \
             .build()
 
+        # Регистрация обработчиков
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("terms", terms))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
@@ -744,12 +761,17 @@ def main():
             first=10
         )
 
-        logger.info("Запуск бота...")
+        # Запуск health эндпоинта
+        asyncio.ensure_future(run_health_endpoint())
+
+        logger.info("Запуск бота с Polling...")
         app.run_polling(drop_pending_updates=True)
+
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}")
         asyncio.run(asyncio.sleep(5))
         raise
+
 
 if __name__ == "__main__":
     main()
