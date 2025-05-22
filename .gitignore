@@ -1,0 +1,18 @@
+# IDE и кэши
+.idea/
+__pycache__/
+*.pyc
+
+# Окружение и секреты
+.env
+*.env
+
+# Логи
+*.log
+chromedriver.log
+
+# Тестовые HTML-файлы
+*.html
+
+# Неправильный Procfile
+Procfile.txt
