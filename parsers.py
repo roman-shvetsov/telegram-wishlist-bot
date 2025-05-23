@@ -13,6 +13,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import logging
 from cachetools import TTLCache
+import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -63,7 +64,25 @@ async def parse_ozon(url: str) -> Tuple[str, str, str]:
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
-    options.binary_location = "/usr/bin/google-chrome"  # Путь к Chrome на Render
+
+    # Пробуем несколько возможных путей к Chrome
+    possible_chrome_paths = [
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/lib/chromium-browser/chrome",
+        "/usr/bin/chromium",
+        "/opt/google/chrome/chrome"
+    ]
+    chrome_found = False
+    for path in possible_chrome_paths:
+        if os.path.exists(path):
+            options.binary_location = path
+            logger.info(f"Using Chrome binary at: {path}")
+            chrome_found = True
+            break
+    if not chrome_found:
+        logger.error("No Chrome binary found in expected paths")
+        return "Ошибка: Chrome не найден", "Ошибка: Chrome не найден", 'ozon.ru'
 
     try:
         service = Service(ChromeDriverManager().install())
@@ -106,6 +125,15 @@ async def parse_ozon(url: str) -> Tuple[str, str, str]:
             price = re.sub(r'[^\d\s]', '', price_text).strip() + ' ₽'
         except Exception as e:
             logger.error(f"Ошибка поиска цены на Ozon: {e}")
+
+        # Сохраняем HTML для отладки
+        try:
+            html_file = f"/tmp/ozon_page_{url.split('/')[-2]}.html"
+            with open(html_file, "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+            logger.info(f"HTML сохранен в {html_file}")
+        except Exception as e:
+            logger.error(f"Ошибка сохранения HTML: {e}")
 
         logger.info(f"Успешно распарсено Ozon: {title}, {price}")
         return title, price, 'ozon.ru'
