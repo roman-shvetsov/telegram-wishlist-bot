@@ -6,8 +6,11 @@ import httpx
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 import logging
 from cachetools import TTLCache
 
@@ -18,12 +21,10 @@ logger = logging.getLogger(__name__)
 cache = TTLCache(maxsize=100, ttl=3600)
 
 # Семафор для ограничения одновременных парсингов
-semaphore = asyncio.Semaphore(2)  # Ограничиваем до 2 одновременных парсингов
-
+semaphore = asyncio.Semaphore(2)
 
 async def parse_product_info(url: str) -> Optional[Tuple[str, str, str]]:
     """Определяет тип сайта и вызывает соответствующий парсер"""
-    # Проверяем кэш
     if url in cache:
         logger.info(f"Используем кэшированный результат для {url}")
         return cache[url]
@@ -44,7 +45,6 @@ async def parse_product_info(url: str) -> Optional[Tuple[str, str, str]]:
             else:
                 result = await parse_generic(url)
 
-            # Сохраняем в кэш
             if result:
                 cache[url] = result
             return result
@@ -52,402 +52,287 @@ async def parse_product_info(url: str) -> Optional[Tuple[str, str, str]]:
             logger.error(f"Ошибка в parse_product_info: {e}")
             return None
 
-
 async def parse_ozon(url: str) -> Tuple[str, str, str]:
     logger.info(f"Парсинг Ozon: {url}")
-    options = webdriver.ChromeOptions()
-    options.add_argument("--headless")
-    options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--start-maximized")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
-
-    try:
-        driver.get(url)
-        await asyncio.sleep(10)
-        title = driver.find_element("xpath", '//h1[contains(@class, "title")]').text
-    except:
-        try:
-            title = driver.find_element("xpath", '//h1').text
-        except:
-            title = "Название не найдено"
-
-    price = "Цена не найдена"
-    try:
-        price_elements = driver.find_elements("xpath", '//*[contains(text(), "₽")]')
-        for elem in price_elements:
-            text = elem.text
-            if any(c.isdigit() for c in text):
-                price = re.sub(r'[^\d₽,. ]', '', text).strip()
-                break
-    except Exception as e:
-        logger.error(f"Ошибка при поиске цены на Ozon: {e}")
-
-    logger.info(f"Успешно распарсено Ozon: {title}, {price}")
-    driver.quit()
-    return title, price, 'ozon.ru'
-
-
-async def parse_wildberries(url: str) -> Tuple[str, str, str]:
-    """Финальная версия парсера Wildberries с улучшенным поиском цены"""
-    options = webdriver.ChromeOptions()
-
-    # Настройки для обхода защиты
-    options.add_argument("--headless")
-    options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--start-maximized")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
-
-    try:
-        driver.get(url)
-        await asyncio.sleep(10)  # Увеличиваем время ожидания
-
-        # Поиск названия товара
-        title = "Название не найдено"
-        try:
-            title_elem = driver.find_element("css selector", "h1.product-page__title")
-            title = title_elem.text.strip()
-        except Exception as e:
-            print(f"Ошибка поиска названия: {e}")
-
-        # Улучшенный поиск цены
-        price = "Цена не найдена"
-        try:
-            # Основной вариант - новый дизайн
-            price_elem = driver.find_element("css selector",
-                                             "span.price-block__final-price, ins.price-block__final-price")
-            price_text = price_elem.text.strip()
-
-            # Альтернативный вариант - старый дизайн
-            if not price_text or not any(c.isdigit() for c in price_text):
-                price_elems = driver.find_elements("xpath",
-                                                   "//div[contains(@class, 'price-block')]//span[contains(@class, 'final-price') or contains(text(), '₽')]")
-                for elem in price_elems:
-                    text = elem.text.strip()
-                    if any(c.isdigit() for c in text):
-                        price_text = text
-                        break
-
-            # Очистка цены
-            if price_text:
-                price = re.sub(r'[^\d₽]', '', price_text)
-                if not price.endswith('₽'):
-                    price += '₽'
-        except Exception as e:
-            print(f"Ошибка поиска цены: {e}")
-            # Последняя попытка найти любую цену на странице
-            try:
-                price_elems = driver.find_elements("xpath", "//*[contains(text(), '₽')]")
-                for elem in price_elems:
-                    text = elem.text.strip()
-                    if any(c.isdigit() for c in text):
-                        price = re.sub(r'[^\d₽]', '', text)
-                        if not price.endswith('₽'):
-                            price += '₽'
-                        break
-            except:
-                pass
-
-        print(f"Wildberries: {title}, {price}")
-        return title, price, 'wildberries.ru'
-
-    except Exception as e:
-        print(f"Ошибка парсинга Wildberries: {e}")
-        return "Ошибка парсинга", "Ошибка парсинга", 'wildberries.ru'
-    finally:
-        driver.quit()
-
-
-async def parse_yandex_market(url: str) -> Tuple[str, str, str]:
-    """Парсер для Яндекс.Маркета с поиском названия и цены"""
-    options = webdriver.ChromeOptions()
-
-    # Настройки для обхода защиты
+    options = Options()
     options.add_argument("--headless=new")
     options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
     options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--window-size=1920,1080")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    options.binary_location = "/usr/bin/google-chrome"  # Путь к Chrome на Render
 
     try:
-        # Имитация человеческого поведения
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": """
                 Object.defineProperty(navigator, 'webdriver', {
                     get: () => undefined
                 });
-                window.navigator.chrome = {
-                    runtime: {},
-                };
             """
         })
 
-        # Открываем страницу
         driver.get(url)
-        await asyncio.sleep(10)  # Ожидание загрузки
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.TAG_NAME, "h1"))
+        )
 
-        # 1. Надежный поиск названия
+        # Поиск названия
         title = "Название не найдено"
         try:
-            # Основные варианты селекторов для названия
-            title_selectors = [
-                "h1[data-zone-name='title']",  # Новый дизайн
-                "h1.title",  # Старый дизайн
-                "h1[itemprop='name']",  # Для микроразметки
-                "div[data-apiary-widget-name='@MarketNode/Title'] h1",
-                "h1"  # Крайний случай
-            ]
+            title_elem = driver.find_element(By.CSS_SELECTOR, "h1.tsHeadline3")
+            title = title_elem.text.strip()
+        except:
+            try:
+                title_elem = driver.find_element(By.TAG_NAME, "h1")
+                title = title_elem.text.strip()
+            except Exception as e:
+                logger.error(f"Ошибка поиска названия на Ozon: {e}")
 
-            for selector in title_selectors:
-                try:
-                    element = driver.find_element(By.CSS_SELECTOR, selector)
-                    title = element.text.strip()
-                    if title and len(title) > 3:  # Проверка на валидность
-                        break
-                except:
-                    continue
-        except Exception as e:
-            print(f"Ошибка поиска названия: {e}")
-
-        # 2. Поиск цены (как в вашем рабочем варианте)
+        # Поиск цены
         price = "Цена не найдена"
         try:
-            # Основной вариант для нового дизайна
-            price_elem = driver.find_element(
-                By.CSS_SELECTOR,
-                "span[data-auto='snippet-price-current'], "
-                "span.ds-text.ds-text_weight_bold.ds-text_color_price-term, "
-                ".price-block__final-price"
+            price_elem = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((
+                    By.CSS_SELECTOR,
+                    "span.o8n.o8o, span.o8o3, span[data-auto='snippet-price-current']"
+                ))
             )
             price_text = price_elem.text.strip()
-            price = re.sub(r'[^\d]', '', price_text) + '₽'
+            price = re.sub(r'[^\d\s]', '', price_text).strip() + ' ₽'
         except Exception as e:
-            print(f"Ошибка поиска цены: {e}")
+            logger.error(f"Ошибка поиска цены на Ozon: {e}")
 
-        print(f"Яндекс.Маркет: {title}, {price}")
+        logger.info(f"Успешно распарсено Ozon: {title}, {price}")
+        return title, price, 'ozon.ru'
+
+    except Exception as e:
+        logger.error(f"Ошибка парсинга Ozon: {e}")
+        return "Ошибка парсинга", "Ошибка парсинга", 'ozon.ru'
+    finally:
+        driver.quit()
+
+async def parse_wildberries(url: str) -> Tuple[str, str, str]:
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    options.binary_location = "/usr/bin/google-chrome"
+
+    try:
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+        driver.get(url)
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.TAG_NAME, "h1"))
+        )
+
+        title = "Название не найдено"
+        try:
+            title_elem = driver.find_element(By.CSS_SELECTOR, "h1.product-page__title")
+            title = title_elem.text.strip()
+        except Exception as e:
+            logger.error(f"Ошибка поиска названия: {e}")
+
+        price = "Цена не найдена"
+        try:
+            price_elem = driver.find_element(
+                By.CSS_SELECTOR,
+                "span.price-block__final-price, ins.price-block__final-price"
+            )
+            price_text = price_elem.text.strip()
+            price = re.sub(r'[^\d]', '', price_text) + ' ₽'
+        except Exception as e:
+            logger.error(f"Ошибка поиска цены: {e}")
+
+        logger.info(f"Wildberries: {title}, {price}")
+        return title, price, 'wildberries.ru'
+
+    except Exception as e:
+        logger.error(f"Ошибка парсинга Wildberries: {e}")
+        return "Ошибка парсинга", "Ошибка парсинга", 'wildberries.ru'
+    finally:
+        driver.quit()
+
+async def parse_yandex_market(url: str) -> Tuple[str, str, str]:
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    options.binary_location = "/usr/bin/google-chrome"
+
+    try:
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+        driver.get(url)
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.TAG_NAME, "h1"))
+        )
+
+        title = "Название не найдено"
+        try:
+            title_elem = driver.find_element(By.CSS_SELECTOR, "h1[data-zone-name='title']")
+            title = title_elem.text.strip()
+        except:
+            try:
+                title_elem = driver.find_element(By.TAG_NAME, "h1")
+                title = title_elem.text.strip()
+            except Exception as e:
+                logger.error(f"Ошибка поиска названия: {e}")
+
+        price = "Цена не найдена"
+        try:
+            price_elem = driver.find_element(
+                By.CSS_SELECTOR,
+                "span[data-auto='snippet-price-current'], span.price-block__final-price"
+            )
+            price_text = price_elem.text.strip()
+            price = re.sub(r'[^\d]', '', price_text) + ' ₽'
+        except Exception as e:
+            logger.error(f"Ошибка поиска цены: {e}")
+
+        logger.info(f"Яндекс.Маркет: {title}, {price}")
         return title, price, 'market.yandex.ru'
 
     except Exception as e:
-        print(f"Ошибка парсинга Яндекс.Маркет: {e}")
+        logger.error(f"Ошибка парсинга Яндекс.Маркет: {e}")
         return "Ошибка парсинга", "Ошибка парсинга", 'market.yandex.ru'
     finally:
         driver.quit()
 
-
 async def parse_avito(url: str) -> Tuple[str, str, str]:
-    """Надежный парсер для Авито с поиском названия и цены"""
-    options = webdriver.ChromeOptions()
-
-    # Настройки для обхода защиты
+    options = Options()
     options.add_argument("--headless=new")
     options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
     options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--window-size=1920,1080")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    options.binary_location = "/usr/bin/google-chrome"
 
     try:
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
         driver.get(url)
-        await asyncio.sleep(10)  # Ожидание полной загрузки
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.TAG_NAME, "h1"))
+        )
 
-        # 1. Улучшенный поиск названия
         title = "Название не найдено"
         try:
-            # Основные селекторы для названия на Авито
-            title_selectors = [
-                "h1.title-info-title",  # Основной селектор
-                "h1[itemprop='name']",  # Для микроразметки
-                "h1.style-title-info-title",  # Альтернативный вариант
-                "h1"  # Крайний случай
-            ]
-
-            for selector in title_selectors:
-                try:
-                    title_elem = driver.find_element(By.CSS_SELECTOR, selector)
-                    title = title_elem.text.strip()
-                    if title and len(title) > 3:  # Проверка на валидность
-                        break
-                except:
-                    continue
+            title_elem = driver.find_element(By.CSS_SELECTOR, "h1.title-info-title")
+            title = title_elem.text.strip()
         except Exception as e:
-            print(f"Ошибка поиска названия: {e}")
+            logger.error(f"Ошибка поиска названия: {e}")
 
-        # 2. Точный поиск цены
         price = "Цена не найдена"
         try:
-            # Вариант 1: Из атрибута content (наиболее надежный)
             price_elem = driver.find_element(By.CSS_SELECTOR, "span[itemprop='price']")
             price_content = price_elem.get_attribute("content")
-
             if price_content and price_content.isdigit():
                 price = f"{int(price_content):,d} ₽".replace(",", " ")
-            else:
-                # Вариант 2: Из текста элемента
-                price_text = price_elem.text.strip()
-                price = re.sub(r'[^\d]', '', price_text)
-                if price:
-                    price = f"{int(price):,d} ₽".replace(",", " ")
-
         except Exception as e:
-            print(f"Ошибка поиска цены: {e}")
-            try:
-                # Вариант 3: Альтернативный поиск
-                price_elem = driver.find_element(By.CSS_SELECTOR, "span[data-marker='item-price']")
-                price_text = price_elem.text.strip()
-                price = re.sub(r'[^\d]', '', price_text)
-                if price:
-                    price = f"{int(price):,d} ₽".replace(",", " ")
-            except:
-                pass
+            logger.error(f"Ошибка поиска цены: {e}")
 
-        print(f"Авито: {title}, {price}")
+        logger.info(f"Авито: {title}, {price}")
         return title, price, 'avito.ru'
 
     except Exception as e:
-        print(f"Ошибка парсинга Авито: {e}")
+        logger.error(f"Ошибка парсинга Авито: {e}")
         return "Ошибка парсинга", "Ошибка парсинга", 'avito.ru'
     finally:
         driver.quit()
 
-
 async def parse_megamarket(url: str) -> Tuple[str, str, str]:
-    """Финальная версия парсера для MegaMarket"""
-    options = webdriver.ChromeOptions()
-
-    # Настройки для обхода защиты
+    options = Options()
     options.add_argument("--headless=new")
     options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
     options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--window-size=1920,1080")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    options.binary_location = "/usr/bin/google-chrome"
 
     try:
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
         driver.get(url)
-        await asyncio.sleep(15)  # Увеличенное время ожидания
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.TAG_NAME, "h1"))
+        )
 
-        # 1. Точный поиск названия
         title = "Название не найдено"
         try:
-            # Основные селекторы для названия
-            title_selectors = [
-                "h1.item-page__title",  # Основной селектор
-                "h1.dtitle",  # Альтернативный вариант
-                "h1.title",  # Дополнительный вариант
-                "h1"  # Крайний случай
-            ]
-
-            for selector in title_selectors:
-                try:
-                    title_elem = driver.find_element(By.CSS_SELECTOR, selector)
-                    title = title_elem.text.strip()
-                    if title and len(title) > 3:  # Проверка на валидность
-                        break
-                except:
-                    continue
+            title_elem = driver.find_element(By.CSS_SELECTOR, "h1.item-page__title")
+            title = title_elem.text.strip()
         except Exception as e:
-            print(f"Ошибка поиска названия: {e}")
+            logger.error(f"Ошибка поиска названия: {e}")
 
-        # 2. Точный поиск цены
         price = "Цена не найдена"
         try:
-            # Основные селекторы для цены
-            price_selectors = [
-                "meta[itemprop='price']",  # Из мета-тега (надежный вариант)
-                "span.sales-block-offer-price__price-final",  # Из текста
-                "div.item-price__final",  # Альтернативный блок
-                "span.price-block__final-price"  # Дополнительный вариант
-            ]
-
-            for selector in price_selectors:
-                try:
-                    price_elem = driver.find_element(By.CSS_SELECTOR, selector)
-
-                    # Пробуем получить из content
-                    price_content = price_elem.get_attribute("content")
-                    if price_content and price_content.isdigit():
-                        price = f"{int(price_content):,d} ₽".replace(",", " ")
-                        break
-
-                    # Если нет content, берем текст
-                    price_text = price_elem.text.strip()
-                    if price_text:
-                        clean_price = re.sub(r'[^\d]', '', price_text)
-                        if clean_price:
-                            price = f"{int(clean_price):,d} ₽".replace(",", " ")
-                            break
-                except:
-                    continue
+            price_elem = driver.find_element(By.CSS_SELECTOR, "meta[itemprop='price']")
+            price_content = price_elem.get_attribute("content")
+            if price_content and price_content.isdigit():
+                price = f"{int(price_content):,d} ₽".replace(",", " ")
         except Exception as e:
-            print(f"Ошибка поиска цены: {e}")
+            logger.error(f"Ошибка поиска цены: {e}")
 
-        print(f"MegaMarket: {title}, {price}")
+        logger.info(f"MegaMarket: {title}, {price}")
         return title, price, 'megamarket.ru'
 
     except Exception as e:
-        print(f"Ошибка парсинга MegaMarket: {e}")
+        logger.error(f"Ошибка парсинга MegaMarket: {e}")
         return "Ошибка парсинга", "Ошибка парсинга", 'megamarket.ru'
     finally:
-        # Для отладки сохраняем HTML
-        with open("megamarket_page.html", "w", encoding="utf-8") as f:
-            f.write(driver.page_source)
         driver.quit()
 
-
 async def parse_aliexpress(url: str) -> Tuple[str, str, str]:
-    """Парсинг товаров с AliExpress"""
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
     }
 
     async with httpx.AsyncClient() as client:
         response = await client.get(url, headers=headers, follow_redirects=True)
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        # Название товара
+        title = "Название не найдено"
         try:
-            title = soup.find('h1').text.strip()
-        except:
-            title = "Название не найдено"
+            title_elem = soup.find('h1')
+            title = title_elem.text.strip()
+        except Exception as e:
+            logger.error(f"Ошибка поиска названия на AliExpress: {e}")
 
-        # Цена
+        price = "Цена не найдена"
         try:
-            price = soup.find('div', class_='es--wrap--erdmPRe').text.strip()
-            price = re.sub(r'[^\d₽,. ]', '', price).strip()
-        except:
-            price = "Цена не найдена"
+            price_elem = soup.find('div', class_='es--wrap--erdmPRe')
+            price_text = price_elem.text.strip()
+            price = re.sub(r'[^\d,.]', '', price_text).replace(',', '.') + ' ₽'
+        except Exception as e:
+            logger.error(f"Ошибка поиска цены на AliExpress: {e}")
 
         return title, price, 'aliexpress.ru'
 
-
 async def parse_generic(url: str) -> Tuple[str, str, str]:
-    """Базовый парсинг для других сайтов"""
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
     }
 
     domain = urlparse(url).netloc.lower()
@@ -456,18 +341,21 @@ async def parse_generic(url: str) -> Tuple[str, str, str]:
         response = await client.get(url, headers=headers, follow_redirects=True)
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        # Название товара (пробуем найти h1)
+        title = "Название не найдено"
         try:
-            title = soup.find('h1').text.strip()
-        except:
-            title = "Название не найдено"
+            title_elem = soup.find('h1')
+            title = title_elem.text.strip()
+        except Exception as e:
+            logger.error(f"Ошибка поиска названия: {e}")
 
-        # Цена (ищем элемент с символом ₽ или руб)
         price = "Цена не найдена"
-        for elem in soup.find_all(string=re.compile(r'₽|руб|руб\.')):
-            price_text = elem.text.strip()
-            if any(c.isdigit() for c in price_text):
-                price = re.sub(r'[^\d₽,. ]', '', price_text).strip()
-                break
+        try:
+            for elem in soup.find_all(string=re.compile(r'₽|руб|руб\.')):
+                price_text = elem.text.strip()
+                if any(c.isdigit() for c in price_text):
+                    price = re.sub(r'[^\d\s]', '', price_text).strip() + ' ₽'
+                    break
+        except Exception as e:
+            logger.error(f"Ошибка поиска цены: {e}")
 
         return title, price, domain

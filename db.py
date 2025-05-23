@@ -107,29 +107,24 @@ async def register_user(user):
 
 
 async def update_product_info(pool, gift_id, link):
-    """Обновляет информацию о товаре"""
     from parsers import parse_product_info
-
     try:
-        print(f"Начало парсинга товара {gift_id}: {link}")
+        logger.info(f"Начало парсинга товара {gift_id}: {link}")
         product_info = await parse_product_info(link)
-
         if product_info:
             title, price, domain = product_info
-            print(f"Получены данные: {title}, {price}, {domain}")
-
+            logger.info(f"Получены данные: {title}, {price}, {domain}")
             async with pool.acquire() as conn:
                 await conn.execute('''
                     UPDATE wishlist 
                     SET title = $1, price = $2, domain = $3, parsed_at = NOW()
                     WHERE id = $4
                 ''', title, price, domain, gift_id)
-                print(f"Данные для {gift_id} обновлены")
+                logger.info(f"Данные для {gift_id} обновлены")
         else:
-            print(f"Не удалось получить данные для {gift_id}")
-
+            logger.warning(f"Не удалось получить данные для {gift_id}")
     except Exception as e:
-        print(f"Критическая ошибка при обновлении товара {gift_id}: {str(e)}")
+        logger.error(f"Критическая ошибка при обновлении товара {gift_id}: {str(e)}")
 
 
 async def add_link_to_wishlist(user_id, link):
