@@ -184,11 +184,19 @@ async def get_friends(user_id: int):
 async def remove_friend(user_id: int, friend_id: int):
     pool = get_pool()
     async with pool.acquire() as conn:
-        await conn.execute('''
-            DELETE FROM friends 
-            WHERE (user_id = $1 AND friend_id = $2) 
-            OR (user_id = $2 AND friend_id = $1)
-        ''', user_id, friend_id)
+        async with conn.transaction():
+            # Удаляем дружбу из таблицы friends
+            await conn.execute('''
+                DELETE FROM friends 
+                WHERE (user_id = $1 AND friend_id = $2) 
+                OR (user_id = $2 AND friend_id = $1)
+            ''', user_id, friend_id)
+            # Удаляем все связанные запросы из friend_requests
+            await conn.execute('''
+                DELETE FROM friend_requests 
+                WHERE (from_user_id = $1 AND to_user_id = $2) 
+                OR (from_user_id = $2 AND to_user_id = $1)
+            ''', user_id, friend_id)
 
 
 async def add_feedback(user_id: int, username: str, text: str):
@@ -230,7 +238,6 @@ async def update_friend_request(from_user_id: int, to_user_id: int, status: str)
     pool = get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # Ищем активный запрос между пользователями
             request = await conn.fetchrow('''
                 SELECT * FROM friend_requests 
                 WHERE from_user_id = $1 AND to_user_id = $2 AND status = 'pending'
@@ -241,19 +248,19 @@ async def update_friend_request(from_user_id: int, to_user_id: int, status: str)
             if not request:
                 return False
 
-            # Обновляем статус запроса
-            await conn.execute('''
-                UPDATE friend_requests SET status = $1 
-                WHERE id = $2
-            ''', status, request['id'])
-
-            if status == 'accept':  # Обратите внимание на изменение с 'accepted' на 'accept'
+            if status == 'accept':
                 # Добавляем взаимную дружбу
                 await conn.execute('''
                     INSERT INTO friends (user_id, friend_id) 
                     VALUES ($1, $2), ($2, $1)
                     ON CONFLICT DO NOTHING
                 ''', from_user_id, to_user_id)
+
+            # Удаляем запрос после обработки
+            await conn.execute('''
+                DELETE FROM friend_requests 
+                WHERE id = $1
+            ''', request['id'])
 
             return True
 
