@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: wishlist-bot-sptt
+    name: wishlist-bot-sptt-docker
     env: docker
     dockerfilePath: ./Dockerfile
     plan: free
