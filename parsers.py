@@ -58,14 +58,19 @@ async def parse_ozon(url: str) -> Tuple[str, str, str]:
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--start-maximized")
+    options.add_argument("--lang=ru-RU")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option('useAutomationExtension', False)
 
-    # Пробуем несколько возможных путей к Chrome
+    # Пробуем несколько путей к Chrome
     possible_chrome_paths = [
         "/usr/bin/google-chrome",
         "/usr/bin/google-chrome-stable",
@@ -95,30 +100,40 @@ async def parse_ozon(url: str) -> Tuple[str, str, str]:
             """
         })
 
+        # Загружаем страницу
         driver.get(url)
-        WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.TAG_NAME, "h1"))
+        WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
         )
+
+        # Проверяем, есть ли блокировка
+        page_title = driver.find_element(By.TAG_NAME, "title").text.lower()
+        if "доступ ограничен" in page_title or "captcha" in page_title:
+            logger.error("Обнаружена блокировка или капча")
+            html_file = f"ozon_page_{url.split('/')[-2]}.html"
+            with open(html_file, "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+            logger.info(f"HTML сохранён в {html_file}")
+            driver.quit()
+            return "Блокировка доступа", "Цена не найдена", 'ozon.ru'
 
         # Поиск названия
         title = "Название не найдено"
         try:
-            title_elem = driver.find_element(By.CSS_SELECTOR, "h1.tsHeadline3")
+            title_elem = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "h1.tsHeadline3, h1"))
+            )
             title = title_elem.text.strip()
-        except:
-            try:
-                title_elem = driver.find_element(By.TAG_NAME, "h1")
-                title = title_elem.text.strip()
-            except Exception as e:
-                logger.error(f"Ошибка поиска названия на Ozon: {e}")
+        except Exception as e:
+            logger.error(f"Ошибка поиска названия на Ozon: {e}")
 
         # Поиск цены
         price = "Цена не найдена"
         try:
-            price_elem = WebDriverWait(driver, 5).until(
+            price_elem = WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((
                     By.CSS_SELECTOR,
-                    "span.o8n.o8o, span.o8o3, span[data-auto='snippet-price-current']"
+                    "span[data-auto='snippet-price-current'], span.o8n.o8o, span.o8o3, div[data-auto='price'] span"
                 ))
             )
             price_text = price_elem.text.strip()
@@ -128,10 +143,10 @@ async def parse_ozon(url: str) -> Tuple[str, str, str]:
 
         # Сохраняем HTML для отладки
         try:
-            html_file = f"/tmp/ozon_page_{url.split('/')[-2]}.html"
+            html_file = f"ozon_page_{url.split('/')[-2]}.html"
             with open(html_file, "w", encoding="utf-8") as f:
                 f.write(driver.page_source)
-            logger.info(f"HTML сохранен в {html_file}")
+            logger.info(f"HTML сохранён в {html_file}")
         except Exception as e:
             logger.error(f"Ошибка сохранения HTML: {e}")
 
