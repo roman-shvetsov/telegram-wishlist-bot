@@ -102,10 +102,14 @@ async def parse_ozon(url: str) -> Tuple[str, str, str]:
 
         # Загружаем страницу
         driver.get(url)
-        await asyncio.sleep(5)  # Задержка для JavaScript
+        await asyncio.sleep(5)
         WebDriverWait(driver, 30).until(
             EC.presence_of_element_located((By.TAG_NAME, "body"))
         )
+
+        # Прокрутка для имитации поведения
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        await asyncio.sleep(2)
 
         # Логируем заголовок
         page_title = driver.find_element(By.TAG_NAME, "title").text
@@ -113,59 +117,68 @@ async def parse_ozon(url: str) -> Tuple[str, str, str]:
 
         # Проверяем блокировку
         if "доступ ограничен" in page_title.lower() or "captcha" in page_title.lower():
-            logger.error("Обнаружена блокировка или капча")
-            html_file = f"html/ozon_page_{url.split('/')[-2]}.html"
-            os.makedirs("html", exist_ok=True)
-            with open(html_file, "w", encoding="utf-8") as f:
-                f.write(driver.page_source)
-            logger.info(f"HTML сохранён в {html_file}")
+            logger.error("Обнаружена блокировка или CAPTCHA")
+            html_dir = "html"
+            os.makedirs(html_dir, exist_ok=True)
+            html_file = f"{html_dir}/ozon_page_{url.split('/')[-1]}.html"
+            try:
+                with open(html_file, "w", encoding="utf-8") as f:
+                    f.write(driver.page_source)
+                logger.info(f"HTML saved to {html_file}")
+                # Логируем файлы
+                files = os.listdir(html_dir)
+                logger.info(f"Files in html dir: {files}")
+            except Exception as e:
+                logger.error(f"Error saving HTML: {e}")
             driver.quit()
-            return "Блокировка доступа", "Цена не найдена", 'ozon.ru'
+            return "Блокировка доступа", "Цена не найдена", 'ozon'
 
         # Поиск названия
         title = "Название не найдено"
         try:
-            title_elem = WebDriverWait(driver, 15).until(
+            title_elem = WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((
                     By.CSS_SELECTOR,
-                    "div[data-widget='webProductHeading'] h1, h1.tsHeadline3, h1"
+                    "div[data-widget='web-title'] h1, div[data-widget='webProductHeading'] h1, h1.tsHeadline3, h1"
                 ))
             )
             title = title_elem.text.strip()
         except Exception as e:
-            logger.error(f"Ошибка поиска названия на Ozon: {e}")
+            logger.error(f"Ошибка поиска названия: {e}")
 
         # Поиск цены
         price = "Цена не найдена"
         try:
-            price_elem = WebDriverWait(driver, 15).until(
+            price_elem = WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((
                     By.CSS_SELECTOR,
-                    "span.mp7_28, span[class*='price'], div[class*='price'] span:contains('₽')"
+                    "span.mp7_28, span[class*='price'], div[class*='price'] span"
                 ))
             )
             price_text = price_elem.text.strip()
             price = re.sub(r'[^\d\s]', '', price_text).strip() + ' ₽'
         except Exception as e:
-            logger.error(f"Ошибка поиска цены на Ozon: {e}")
+            logger.error(f"Ошибка поиска цены: {e}")
 
         # Сохраняем HTML
         try:
             html_dir = "html"
             os.makedirs(html_dir, exist_ok=True)
-            html_file = f"{html_dir}/ozon_page_{url.split('/')[-2]}.html"
+            html_file = f"{html_dir}/ozon_page_{url.split('/')[-1]}.html"
             with open(html_file, "w", encoding="utf-8") as f:
                 f.write(driver.page_source)
-            logger.info(f"HTML сохранён в {html_file}")
+            logger.info(f"HTML saved to {html_file}")
+            files = os.listdir(html_dir)
+            logger.info(f"Files in html dir: {files}")
         except Exception as e:
-            logger.error(f"Ошибка сохранения HTML: {e}")
+            logger.error(f"Error saving HTML: {e}")
 
-        logger.info(f"Успешно распарсено Ozon: {title}, {price}")
-        return title, price, 'ozon.ru'
+        logger.info(f"Получено: {title}, {price}")
+        return title, price, 'ozon'
 
     except Exception as e:
         logger.error(f"Ошибка парсинга Ozon: {e}")
-        return "Ошибка парсинга", "Ошибка парсинга", 'ozon.ru'
+        return "Ошибка парсинга", "Ошибка", 'ozon'
     finally:
         driver.quit()
 
