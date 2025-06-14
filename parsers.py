@@ -61,27 +61,36 @@ async def parse_ozon(url: str) -> Tuple[str, str, str]:
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--lang=ru-RU")
+    options.add_argument("--proxy-server=http://161.35.98.111:8080")  # Замени на свой прокси
 
+    driver = None
     try:
         driver = uc.Chrome(options=options)
+        logger.info(f"Driver initialized for Ozon: {url}")
         driver.get(url)
-        await asyncio.sleep(5)
-        WebDriverWait(driver, 30).until(
+        await asyncio.sleep(10)  # Увеличено для прокси
+        WebDriverWait(driver, 90).until(  # Увеличен таймаут
             EC.presence_of_element_located((By.TAG_NAME, "body"))
         )
 
         # Прокрутка
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        await asyncio.sleep(2)
+        await asyncio.sleep(3)
 
-        # Логируем заголовок и кусок HTML
-        page_title = driver.find_element(By.TAG_NAME, "title").text
-        logger.info(f"Page title: {page_title}")
+        # Логируем HTML
         html_snippet = driver.page_source[:1000]
         logger.info(f"HTML snippet: {html_snippet}")
 
+        # Логируем заголовок
+        try:
+            page_title = driver.find_element(By.TAG_NAME, "title").text
+            logger.info(f"Page title: {page_title}")
+        except Exception as e:
+            logger.error(f"Ошибка получения заголовка: {e}")
+            page_title = ""
+
         # Проверяем блокировку
-        if "доступ ограничен" in page_title.lower() or "captcha" in page_title.lower() or "подозрительн" in html_snippet.lower():
+        if any(x in (page_title.lower() + html_snippet.lower()) for x in ["доступ ограничен", "captcha", "подозрительн"]):
             logger.error("Обнаружена блокировка или CAPTCHA")
             html_dir = "html"
             os.makedirs(html_dir, exist_ok=True)
@@ -94,13 +103,12 @@ async def parse_ozon(url: str) -> Tuple[str, str, str]:
                 logger.info(f"Files in html dir: {files}")
             except Exception as e:
                 logger.error(f"Error saving HTML: {e}")
-            driver.quit()
             return "Блокировка доступа", "Цена не найдена", 'ozon'
 
         # Поиск названия
         title = "Название не найдено"
         try:
-            title_elem = WebDriverWait(driver, 10).until(
+            title_elem = WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((
                     By.CSS_SELECTOR,
                     "div[data-widget='webProductHeading'] h1, h1.tsHeadline550Medium, h1"
@@ -113,7 +121,7 @@ async def parse_ozon(url: str) -> Tuple[str, str, str]:
         # Поиск цены
         price = "Цена не найдена"
         try:
-            price_elem = WebDriverWait(driver, 10).until(
+            price_elem = WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((
                     By.CSS_SELECTOR,
                     "span[data-auto='main-price'] span, span.mp7_28, div[class*='price'] span"
@@ -125,10 +133,10 @@ async def parse_ozon(url: str) -> Tuple[str, str, str]:
             logger.error(f"Ошибка поиска цены: {e}")
 
         # Сохраняем HTML
+        html_dir = "html"
+        os.makedirs(html_dir, exist_ok=True)
+        html_file = f"{html_dir}/ozon_page_{url.split('/')[-2]}.html"
         try:
-            html_dir = "html"
-            os.makedirs(html_dir, exist_ok=True)
-            html_file = f"{html_dir}/ozon_page_{url.split('/')[-2]}.html"
             with open(html_file, "w", encoding="utf-8") as f:
                 f.write(driver.page_source)
             logger.info(f"HTML saved to {html_file}")
@@ -142,9 +150,23 @@ async def parse_ozon(url: str) -> Tuple[str, str, str]:
 
     except Exception as e:
         logger.error(f"Ошибка парсинга Ozon: {e}")
+        # Сохраняем HTML при ошибке
+        if driver:
+            html_dir = "html"
+            os.makedirs(html_dir, exist_ok=True)
+            html_file = f"{html_dir}/ozon_page_{url.split('/')[-2]}_error.html"
+            try:
+                with open(html_file, "w", encoding="utf-8") as f:
+                    f.write(driver.page_source)
+                logger.info(f"Error HTML saved to {html_file}")
+                files = os.listdir(html_dir)
+                logger.info(f"Files in html dir: {files}")
+            except Exception as e2:
+                logger.error(f"Error saving error HTML: {e2}")
         return "Ошибка парсинга", "Ошибка", 'ozon'
     finally:
-        driver.quit()
+        if driver:
+            driver.quit()
 
 async def parse_wildberries(url: str) -> Tuple[str, str, str]:
     logger.info(f"Парсинг Wildberries: {url}")
@@ -162,27 +184,36 @@ async def parse_wildberries(url: str) -> Tuple[str, str, str]:
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--lang=ru-RU")
+    options.add_argument("--proxy-server=http://161.35.98.111:8080")  # Замени на свой прокси
 
+    driver = None
     try:
         driver = uc.Chrome(options=options)
+        logger.info(f"Driver initialized for Wildberries: {url}")
         driver.get(url)
-        await asyncio.sleep(5)
-        WebDriverWait(driver, 15).until(
+        await asyncio.sleep(10)  # Увеличено для прокси
+        WebDriverWait(driver, 90).until(  # Увеличен таймаут
             EC.presence_of_element_located((By.TAG_NAME, "body"))
         )
 
         # Прокрутка
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        await asyncio.sleep(2)
+        await asyncio.sleep(3)
 
-        # Логируем заголовок и HTML
-        page_title = driver.find_element(By.TAG_NAME, "title").text
-        logger.info(f"Page title: {page_title}")
+        # Логируем HTML
         html_snippet = driver.page_source[:1000]
         logger.info(f"HTML snippet: {html_snippet}")
 
+        # Логируем заголовок
+        try:
+            page_title = driver.find_element(By.TAG_NAME, "title").text
+            logger.info(f"Page title: {page_title}")
+        except Exception as e:
+            logger.error(f"Ошибка получения заголовка: {e}")
+            page_title = ""
+
         # Проверяем блокировку
-        if "капча" in page_title.lower() or "подозрительн" in html_snippet.lower():
+        if any(x in (page_title.lower() + html_snippet.lower()) for x in ["капча", "подозрительн"]):
             logger.error("Обнаружена блокировка или CAPTCHA")
             html_dir = "html"
             os.makedirs(html_dir, exist_ok=True)
@@ -195,13 +226,12 @@ async def parse_wildberries(url: str) -> Tuple[str, str, str]:
                 logger.info(f"Files in html dir: {files}")
             except Exception as e:
                 logger.error(f"Error saving HTML: {e}")
-            driver.quit()
             return "Блокировка доступа", "Цена не найдена", 'wildberries.ru'
 
         # Поиск названия
         title = "Название не найдено"
         try:
-            title_elem = WebDriverWait(driver, 10).until(
+            title_elem = WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((
                     By.CSS_SELECTOR,
                     "h1.product-page__header, h1[itemprop='name'], h1"
@@ -214,7 +244,7 @@ async def parse_wildberries(url: str) -> Tuple[str, str, str]:
         # Поиск цены
         price = "Цена не найдена"
         try:
-            price_elem = WebDriverWait(driver, 10).until(
+            price_elem = WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((
                     By.CSS_SELECTOR,
                     "span.price-block__price, ins.price-block__price-final, span.current-price, span[data-testid='price-current']"
@@ -226,10 +256,10 @@ async def parse_wildberries(url: str) -> Tuple[str, str, str]:
             logger.error(f"Ошибка поиска цены: {e}")
 
         # Сохраняем HTML
+        html_dir = "html"
+        os.makedirs(html_dir, exist_ok=True)
+        html_file = f"{html_dir}/wb_page_{url.split('/')[-2]}.html"
         try:
-            html_dir = "html"
-            os.makedirs(html_dir, exist_ok=True)
-            html_file = f"{html_dir}/wb_page_{url.split('/')[-2]}.html"
             with open(html_file, "w", encoding="utf-8") as f:
                 f.write(driver.page_source)
             logger.info(f"HTML saved to {html_file}")
@@ -243,9 +273,23 @@ async def parse_wildberries(url: str) -> Tuple[str, str, str]:
 
     except Exception as e:
         logger.error(f"Ошибка парсинга Wildberries: {e}")
+        # Сохраняем HTML при ошибке
+        if driver:
+            html_dir = "html"
+            os.makedirs(html_dir, exist_ok=True)
+            html_file = f"{html_dir}/wb_page_{url.split('/')[-2]}_error.html"
+            try:
+                with open(html_file, "w", encoding="utf-8") as f:
+                    f.write(driver.page_source)
+                logger.info(f"Error HTML saved to {html_file}")
+                files = os.listdir(html_dir)
+                logger.info(f"Files in html dir: {files}")
+            except Exception as e2:
+                logger.error(f"Error saving error HTML: {e2}")
         return "Ошибка парсинга", "Ошибка парсинга", 'wildberries.ru'
     finally:
-        driver.quit()
+        if driver:
+            driver.quit()
 
 async def parse_yandex_market(url: str) -> Tuple[str, str, str]:
     options = uc.ChromeOptions()
