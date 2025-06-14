@@ -20,7 +20,7 @@ RUN wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.d
     && dpkg -i google-chrome-stable_current_amd64.deb || apt-get update && apt-get install -y -f \
     && rm google-chrome-stable_current_amd64.deb
 
-RUN google-chrome --version || echo "ERROR: Google Chrome not installed"
+RUN google-chrome --version
 
 WORKDIR /app
 RUN mkdir -p /app/html && chmod -R 777 /app/html

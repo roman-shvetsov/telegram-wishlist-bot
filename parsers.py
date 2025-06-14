@@ -4,10 +4,7 @@ from typing import Optional, Tuple
 from urllib.parse import urlparse
 import httpx
 from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
+import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -55,77 +52,44 @@ async def parse_product_info(url: str) -> Optional[Tuple[str, str, str]]:
 
 async def parse_ozon(url: str) -> Tuple[str, str, str]:
     logger.info(f"Парсинг Ozon: {url}")
-    options = Options()
+    options = uc.ChromeOptions()
     options.add_argument("--headless=new")
     options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")
-    options.add_argument("--disable-blink-features=AutomationControlled")
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--start-maximized")
     options.add_argument("--lang=ru-RU")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option('useAutomationExtension', False)
-
-    # Пробуем пути к Chrome
-    possible_chrome_paths = [
-        "/usr/bin/google-chrome",
-        "/usr/bin/google-chrome-stable",
-        "/usr/lib/chromium-browser/chrome",
-        "/usr/bin/chromium",
-        "/opt/google/chrome/chrome"
-    ]
-    chrome_found = False
-    for path in possible_chrome_paths:
-        if os.path.exists(path):
-            options.binary_location = path
-            logger.info(f"Using Chrome binary at: {path}")
-            chrome_found = True
-            break
-    if not chrome_found:
-        logger.error("No Chrome binary found in expected paths")
-        return "Ошибка: Chrome не найден", "Ошибка: Chrome не найден", 'ozon.ru'
 
     try:
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
-        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-            "source": """
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined
-                });
-            """
-        })
-
-        # Загружаем страницу
+        driver = uc.Chrome(options=options)
         driver.get(url)
         await asyncio.sleep(5)
         WebDriverWait(driver, 30).until(
             EC.presence_of_element_located((By.TAG_NAME, "body"))
         )
 
-        # Прокрутка для имитации поведения
+        # Прокрутка
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         await asyncio.sleep(2)
 
-        # Логируем заголовок
+        # Логируем заголовок и кусок HTML
         page_title = driver.find_element(By.TAG_NAME, "title").text
         logger.info(f"Page title: {page_title}")
+        html_snippet = driver.page_source[:1000]
+        logger.info(f"HTML snippet: {html_snippet}")
 
         # Проверяем блокировку
-        if "доступ ограничен" in page_title.lower() or "captcha" in page_title.lower():
+        if "доступ ограничен" in page_title.lower() or "captcha" in page_title.lower() or "подозрительн" in html_snippet.lower():
             logger.error("Обнаружена блокировка или CAPTCHA")
             html_dir = "html"
             os.makedirs(html_dir, exist_ok=True)
-            html_file = f"{html_dir}/ozon_page_{url.split('/')[-1]}.html"
+            html_file = f"{html_dir}/ozon_page_{url.split('/')[-2]}.html"
             try:
                 with open(html_file, "w", encoding="utf-8") as f:
                     f.write(driver.page_source)
                 logger.info(f"HTML saved to {html_file}")
-                # Логируем файлы
                 files = os.listdir(html_dir)
                 logger.info(f"Files in html dir: {files}")
             except Exception as e:
@@ -139,7 +103,7 @@ async def parse_ozon(url: str) -> Tuple[str, str, str]:
             title_elem = WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((
                     By.CSS_SELECTOR,
-                    "div[data-widget='web-title'] h1, div[data-widget='webProductHeading'] h1, h1.tsHeadline3, h1"
+                    "div[data-widget='webProductHeading'] h1, h1.tsHeadline550Medium, h1"
                 ))
             )
             title = title_elem.text.strip()
@@ -152,7 +116,7 @@ async def parse_ozon(url: str) -> Tuple[str, str, str]:
             price_elem = WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((
                     By.CSS_SELECTOR,
-                    "span.mp7_28, span[class*='price'], div[class*='price'] span"
+                    "span[data-auto='main-price'] span, span.mp7_28, div[class*='price'] span"
                 ))
             )
             price_text = price_elem.text.strip()
@@ -164,7 +128,7 @@ async def parse_ozon(url: str) -> Tuple[str, str, str]:
         try:
             html_dir = "html"
             os.makedirs(html_dir, exist_ok=True)
-            html_file = f"{html_dir}/ozon_page_{url.split('/')[-1]}.html"
+            html_file = f"{html_dir}/ozon_page_{url.split('/')[-2]}.html"
             with open(html_file, "w", encoding="utf-8") as f:
                 f.write(driver.page_source)
             logger.info(f"HTML saved to {html_file}")
@@ -183,42 +147,96 @@ async def parse_ozon(url: str) -> Tuple[str, str, str]:
         driver.quit()
 
 async def parse_wildberries(url: str) -> Tuple[str, str, str]:
-    options = Options()
+    logger.info(f"Парсинг Wildberries: {url}")
+    # Очищаем кэш для этой ссылки
+    if url in cache:
+        del cache[url]
+        logger.info(f"Кэш очищен для {url}")
+
+    options = uc.ChromeOptions()
     options.add_argument("--headless=new")
     options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
-    options.add_argument("--disable-blink-features=AutomationControlled")
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
-    options.binary_location = "/usr/bin/google-chrome"
+    options.add_argument("--lang=ru-RU")
 
     try:
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
+        driver = uc.Chrome(options=options)
         driver.get(url)
+        await asyncio.sleep(5)
         WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.TAG_NAME, "h1"))
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
         )
 
+        # Прокрутка
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        await asyncio.sleep(2)
+
+        # Логируем заголовок и HTML
+        page_title = driver.find_element(By.TAG_NAME, "title").text
+        logger.info(f"Page title: {page_title}")
+        html_snippet = driver.page_source[:1000]
+        logger.info(f"HTML snippet: {html_snippet}")
+
+        # Проверяем блокировку
+        if "капча" in page_title.lower() or "подозрительн" in html_snippet.lower():
+            logger.error("Обнаружена блокировка или CAPTCHA")
+            html_dir = "html"
+            os.makedirs(html_dir, exist_ok=True)
+            html_file = f"{html_dir}/wb_page_{url.split('/')[-2]}.html"
+            try:
+                with open(html_file, "w", encoding="utf-8") as f:
+                    f.write(driver.page_source)
+                logger.info(f"HTML saved to {html_file}")
+                files = os.listdir(html_dir)
+                logger.info(f"Files in html dir: {files}")
+            except Exception as e:
+                logger.error(f"Error saving HTML: {e}")
+            driver.quit()
+            return "Блокировка доступа", "Цена не найдена", 'wildberries.ru'
+
+        # Поиск названия
         title = "Название не найдено"
         try:
-            title_elem = driver.find_element(By.CSS_SELECTOR, "h1.product-page__title")
+            title_elem = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((
+                    By.CSS_SELECTOR,
+                    "h1.product-page__header, h1[itemprop='name'], h1"
+                ))
+            )
             title = title_elem.text.strip()
         except Exception as e:
             logger.error(f"Ошибка поиска названия: {e}")
 
+        # Поиск цены
         price = "Цена не найдена"
         try:
-            price_elem = driver.find_element(
-                By.CSS_SELECTOR,
-                "span.price-block__final-price, ins.price-block__final-price"
+            price_elem = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((
+                    By.CSS_SELECTOR,
+                    "span.price-block__price, ins.price-block__price-final, span.current-price, span[data-testid='price-current']"
+                ))
             )
             price_text = price_elem.text.strip()
-            price = re.sub(r'[^\d]', '', price_text) + ' ₽'
+            price = re.sub(r'[^\d\s]', '', price_text).strip() + ' ₽'
         except Exception as e:
             logger.error(f"Ошибка поиска цены: {e}")
+
+        # Сохраняем HTML
+        try:
+            html_dir = "html"
+            os.makedirs(html_dir, exist_ok=True)
+            html_file = f"{html_dir}/wb_page_{url.split('/')[-2]}.html"
+            with open(html_file, "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+            logger.info(f"HTML saved to {html_file}")
+            files = os.listdir(html_dir)
+            logger.info(f"Files in html dir: {files}")
+        except Exception as e:
+            logger.error(f"Error saving HTML: {e}")
 
         logger.info(f"Wildberries: {title}, {price}")
         return title, price, 'wildberries.ru'
@@ -230,35 +248,30 @@ async def parse_wildberries(url: str) -> Tuple[str, str, str]:
         driver.quit()
 
 async def parse_yandex_market(url: str) -> Tuple[str, str, str]:
-    options = Options()
+    options = uc.ChromeOptions()
     options.add_argument("--headless=new")
     options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
-    options.add_argument("--disable-blink-features=AutomationControlled")
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
-    options.binary_location = "/usr/bin/google-chrome"
+    options.add_argument("--lang=ru-RU")
 
     try:
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
+        driver = uc.Chrome(options=options)
         driver.get(url)
+        await asyncio.sleep(5)
         WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.TAG_NAME, "h1"))
         )
 
         title = "Название не найдено"
         try:
-            title_elem = driver.find_element(By.CSS_SELECTOR, "h1[data-zone-name='title']")
+            title_elem = driver.find_element(By.CSS_SELECTOR, "h1[data-zone-name='title'], h1")
             title = title_elem.text.strip()
-        except:
-            try:
-                title_elem = driver.find_element(By.TAG_NAME, "h1")
-                title = title_elem.text.strip()
-            except Exception as e:
-                logger.error(f"Ошибка поиска названия: {e}")
+        except Exception as e:
+            logger.error(f"Ошибка поиска названия: {e}")
 
         price = "Цена не найдена"
         try:
@@ -281,21 +294,20 @@ async def parse_yandex_market(url: str) -> Tuple[str, str, str]:
         driver.quit()
 
 async def parse_avito(url: str) -> Tuple[str, str, str]:
-    options = Options()
+    options = uc.ChromeOptions()
     options.add_argument("--headless=new")
     options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
-    options.add_argument("--disable-blink-features=AutomationControlled")
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
-    options.binary_location = "/usr/bin/google-chrome"
+    options.add_argument("--lang=ru-RU")
 
     try:
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
+        driver = uc.Chrome(options=options)
         driver.get(url)
+        await asyncio.sleep(5)
         WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.TAG_NAME, "h1"))
         )
@@ -326,21 +338,20 @@ async def parse_avito(url: str) -> Tuple[str, str, str]:
         driver.quit()
 
 async def parse_megamarket(url: str) -> Tuple[str, str, str]:
-    options = Options()
+    options = uc.ChromeOptions()
     options.add_argument("--headless=new")
     options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
-    options.add_argument("--disable-blink-features=AutomationControlled")
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
-    options.binary_location = "/usr/bin/google-chrome"
+    options.add_argument("--lang=ru-RU")
 
     try:
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
+        driver = uc.Chrome(options=options)
         driver.get(url)
+        await asyncio.sleep(5)
         WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.TAG_NAME, "h1"))
         )
@@ -372,7 +383,7 @@ async def parse_megamarket(url: str) -> Tuple[str, str, str]:
 
 async def parse_aliexpress(url: str) -> Tuple[str, str, str]:
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
     }
 
     async with httpx.AsyncClient() as client:
@@ -398,7 +409,7 @@ async def parse_aliexpress(url: str) -> Tuple[str, str, str]:
 
 async def parse_generic(url: str) -> Tuple[str, str, str]:
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
     }
 
     domain = urlparse(url).netloc.lower()
