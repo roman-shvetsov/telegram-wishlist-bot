@@ -714,8 +714,14 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
                 reply_markup=main_keyboard()
             )
             return
-        await add_link_to_wishlist(update.effective_user.id, message)
-        await update.message.reply_text("Подарок добавлен в твой список! 👍")
+        # Добавляем уведомление о начале парсинга
+        msg = await update.message.reply_text("⏳ Добавляем товар, подождите...")
+        try:
+            await add_link_to_wishlist(update.effective_user.id, message)
+            await msg.edit_text("✅ Подарок добавлен в твой список! 👍")
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении ссылки {message}: {e}")
+            await msg.edit_text("❌ Не удалось добавить подарок. Попробуйте позже.")
         return
 
     await handle_buttons(update, context)
@@ -735,11 +741,16 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Сообщение отправлено всем пользователям!")
 
 async def health_check(request: web.Request):
-    return web.Response(text="OK")
+    logger.info(f"Received {request.method} request to /health")
+    # Поддержка HEAD и GET запросов
+    if request.method in ['HEAD', 'GET']:
+        return web.Response(text="OK", status=200)
+    return web.Response(text="Method Not Allowed", status=405)
 
 async def run_health_endpoint():
     web_app = web.Application()
-    web_app.router.add_get('/health', health_check)
+    web_app.router.add_route('HEAD', '/health', health_check)
+    web_app.router.add_route('GET', '/health', health_check)
     runner = web.AppRunner(web_app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', 8080)
