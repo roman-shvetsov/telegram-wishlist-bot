@@ -1,32 +1,36 @@
-﻿FROM python:3.10-slim
+﻿# Базовый образ
+FROM python:3.12-slim
 
+# Установка зависимостей для Chrome и ChromeDriver
 RUN apt-get update && apt-get install -y \
     wget \
-    gnupg \
     unzip \
+    gnupg \
     curl \
-    libx11-6 \
-    libx11-xcb1 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxrandr2 \
-    libxtst6 \
-    libnss3 \
-    libatk-bridge2.0-0 \
-    libgtk-3-0 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
-    && dpkg -i google-chrome-stable_current_amd64.deb || apt-get update && apt-get install -y -f \
-    && rm google-chrome-stable_current_amd64.deb
+# Установка Google Chrome
+RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
+    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list \
+    && apt-get update \
+    && apt-get install -y google-chrome-stable \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN google-chrome --version
-
+# Установка рабочей директории
 WORKDIR /app
-RUN mkdir -p /app/html && chmod -R 777 /app/html
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
+# Создание директории для HTML и установка прав
+RUN mkdir -p /app/html && chmod -R 777 /app/html
+
+# Копирование requirements.txt
+COPY requirements.txt .
+
+# Обновление pip и установка зависимостей
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Копирование остального кода
 COPY . .
 
+# Команда для запуска приложения
 CMD ["python", "main.py"]
