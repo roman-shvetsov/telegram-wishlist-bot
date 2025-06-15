@@ -14,8 +14,8 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
+from telegram.error import Forbidden, BadRequest, TimedOut
 from telegram.constants import ParseMode
-from telegram.error import TimedOut
 from telegram.request import HTTPXRequest
 from db import (
     init_db,
@@ -310,14 +310,26 @@ async def handle_user_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
             text=f"👋 Пользователь {update.effective_user.first_name} хочет добавить вас в друзья!",
             reply_markup=request_keyboard
         )
-
         await update.message.reply_text(
             "Запрос в друзья успешно отправлен!",
             reply_markup=main_keyboard()
         )
-    except Exception:
+    except Forbidden as e:
+        logger.error(f"Forbidden error sending friend request to {selected_user_id}: {e}")
         await update.message.reply_text(
-            "Не удалось отправить запрос. Возможно, пользователь заблокировал бота.",
+            "Друг ещё не начал чат с ботом. Попросите его отправить /start.",
+            reply_markup=main_keyboard()
+        )
+    except BadRequest as e:
+        logger.error(f"BadRequest error sending friend request to {selected_user_id}: {e}")
+        await update.message.reply_text(
+            "Не удалось отправить запрос. Проверьте, что друг использует Telegram.",
+            reply_markup=main_keyboard()
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error sending friend request to {selected_user_id}: {e}")
+        await update.message.reply_text(
+            "Произошла ошибка при отправке запроса. Попробуйте позже.",
             reply_markup=main_keyboard()
         )
 
