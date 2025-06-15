@@ -290,9 +290,18 @@ async def handle_user_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    if not await create_friend_request(update.effective_user.id, selected_user_id):
+    try:
+        created = await create_friend_request(update.effective_user.id, selected_user_id)
+        if not created:
+            await update.message.reply_text(
+                "Вы уже отправили запрос этому пользователю 😊",
+                reply_markup=main_keyboard()
+            )
+            return
+    except Exception as e:
+        logger.error(f"Error creating friend request for user {update.effective_user.id} to {selected_user_id}: {e}")
         await update.message.reply_text(
-            "Вы уже отправили запрос этому пользователю 😊",
+            "Произошла ошибка при создании запроса в друзья. Попробуйте позже.",
             reply_markup=main_keyboard()
         )
         return

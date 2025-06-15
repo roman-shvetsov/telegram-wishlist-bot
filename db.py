@@ -206,27 +206,33 @@ async def add_feedback(user_id: int, username: str, text: str):
 async def create_friend_request(from_user_id: int, to_user_id: int) -> bool:
     pool = get_pool()
     async with pool.acquire() as conn:
-        # Проверяем существование запроса или дружбы
-        exists = await conn.fetchval('''
-            SELECT EXISTS(
-                SELECT 1 FROM friend_requests 
-                WHERE (from_user_id = $1 AND to_user_id = $2)
-                   OR (from_user_id = $2 AND to_user_id = $1)
-            ) OR EXISTS(
-                SELECT 1 FROM friends 
-                WHERE (user_id = $1 AND friend_id = $2)
-                   OR (user_id = $2 AND friend_id = $1)
-            )
-        ''', from_user_id, to_user_id)
+        async with conn.transaction():
+            # Проверяем существующий запрос
+            existing_request = await conn.fetchrow('''
+                SELECT id, status FROM friend_requests
+                WHERE from_user_id = $1 AND to_user_id = $2
+            ''', from_user_id, to_user_id)
 
-        if exists:
-            return False
+            if existing_request:
+                if existing_request['status'] == 'pending':
+                    return False  # Запрос уже отправлен
+                else:
+                    # Удаляем старый запрос (accepted или rejected)
+                    await conn.execute('''
+                        DELETE FROM friend_requests
+                        WHERE from_user_id = $1 AND to_user_id = $2
+                    ''', from_user_id, to_user_id)
 
-        await conn.execute('''
-            INSERT INTO friend_requests (from_user_id, to_user_id)
-            VALUES ($1, $2)
-        ''', from_user_id, to_user_id)
-        return True
+            try:
+                # Создаём новый запрос
+                await conn.execute('''
+                    INSERT INTO friend_requests (from_user_id, to_user_id)
+                    VALUES ($1, $2)
+                ''', from_user_id, to_user_id)
+                return True
+            except asyncpg.UniqueViolationError as e:
+                logger.error(f"UniqueViolationError in create_friend_request: {e}")
+                return False
 
 
 async def update_friend_request(from_user_id: int, to_user_id: int, status: str) -> bool:
