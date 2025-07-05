@@ -200,7 +200,7 @@ async def update_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for gift in wishlist:
         try:
             product_info = await parse_product_info(gift['link'])
-            if product_info:
+            if product_info and not product_info.get('error'):
                 title, price, domain = product_info
 
                 pool = get_pool()
@@ -290,18 +290,14 @@ async def handle_user_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    try:
-        created = await create_friend_request(update.effective_user.id, selected_user_id)
-        if not created:
-            await update.message.reply_text(
-                "Вы уже отправили запрос этому пользователю 😊",
-                reply_markup=main_keyboard()
-            )
-            return
-    except Exception as e:
-        logger.error(f"Error creating friend request for user {update.effective_user.id} to {selected_user_id}: {e}")
+    # Проверяем существующий запрос
+    existing_request = await pool.acquire().fetchrow('''
+        SELECT id FROM friend_requests
+        WHERE from_user_id = $1 AND to_user_id = $2 AND status = 'pending'
+    ''', update.effective_user.id, selected_user_id)
+    if existing_request:
         await update.message.reply_text(
-            "Произошла ошибка при создании запроса в друзья. Попробуйте позже.",
+            "Вы уже отправили запрос этому пользователю 😊",
             reply_markup=main_keyboard()
         )
         return
@@ -319,14 +315,22 @@ async def handle_user_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
             text=f"👋 Пользователь {update.effective_user.first_name} хочет добавить вас в друзья!",
             reply_markup=request_keyboard
         )
-        await update.message.reply_text(
-            "Запрос в друзья успешно отправлен!",
-            reply_markup=main_keyboard()
-        )
+        # Создаём запрос только после успешной отправки
+        created = await create_friend_request(update.effective_user.id, selected_user_id)
+        if created:
+            await update.message.reply_text(
+                "Запрос в друзья успешно отправлен!",
+                reply_markup=main_keyboard()
+            )
+        else:
+            await update.message.reply_text(
+                "Запрос уже существует или произошла ошибка. Попробуйте позже.",
+                reply_markup=main_keyboard()
+            )
     except Forbidden as e:
         logger.error(f"Forbidden error sending friend request to {selected_user_id}: {e}")
         await update.message.reply_text(
-            "Друг ещё не начал чат с ботом. Попросите его отправить /start.",
+            f"Не удалось отправить запрос. Попросите друга (@{friend['username']}) отправить /start или проверить, не заблокирован ли бот.",
             reply_markup=main_keyboard()
         )
     except BadRequest as e:
@@ -738,8 +742,19 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         # Добавляем уведомление о начале парсинга
         msg = await update.message.reply_text("⏳ Добавляем товар, подождите...")
         try:
-            await add_link_to_wishlist(update.effective_user.id, message)
-            await msg.edit_text("✅ Подарок добавлен в твой список! 👍")
+            from parsers import parse_product_info
+            product_info = await parse_product_info(message)
+            if not product_info or product_info.get('error'):
+                error_msg = product_info.get('error', 'Не удалось распознать товар. Проверьте ссылку.')
+                await msg.edit_text(f"❌ {error_msg}")
+                return
+
+            title, price, domain = product_info
+            gift_id = await add_link_to_wishlist(update.effective_user.id, message, title, price, domain)
+            if gift_id:
+                await msg.edit_text("✅ Подарок добавлен в твой список! 👍")
+            else:
+                await msg.edit_text("❌ Не удалось добавить подарок. Попробуйте позже.")
         except Exception as e:
             logger.error(f"Ошибка при добавлении ссылки {message}: {e}")
             await msg.edit_text("❌ Не удалось добавить подарок. Попробуйте позже.")
@@ -807,7 +822,6 @@ def main():
         app.add_handler(CallbackQueryHandler(handle_friend_callback, pattern="^(show_wishlist|remove_friend|reserve|cancel_reserve):"))
         app.add_handler(CallbackQueryHandler(handle_friend_request_response, pattern="^friend_request:"))
         app.add_handler(MessageHandler(filters.StatusUpdate.USER_SHARED, handle_user_shared))
-        app.add_handler(CommandHandler("update_prices", update_prices))
         app.add_handler(CommandHandler("broadcast", broadcast))
 
         app.job_queue.run_repeating(
