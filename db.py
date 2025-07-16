@@ -1,13 +1,8 @@
 import asyncpg
 import os
 from dotenv import load_dotenv
-import asyncio
 import logging
-
-try:
-    from parsers import parse_product_info
-except ImportError:
-    async def parse_product_info(url): return None
+import asyncio
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,10 +14,9 @@ if not DATABASE_URL:
 
 pool = None
 
-
 async def init_db():
     global pool
-    for attempt in range(3):  # 3 попытки подключения
+    for attempt in range(3):
         try:
             logger.info(f"Попытка подключения к базе данных (попытка {attempt + 1}): {DATABASE_URL}")
             pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
@@ -34,23 +28,19 @@ async def init_db():
                         username TEXT,
                         first_name TEXT
                     );
-        
+
                     CREATE TABLE IF NOT EXISTS wishlist (
                         id SERIAL PRIMARY KEY,
                         user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
-                        link TEXT,
-                        title TEXT,
-                        price TEXT,
-                        domain TEXT,
-                        parsed_at TIMESTAMP
+                        link TEXT
                     );
-        
+
                     CREATE TABLE IF NOT EXISTS friends (
                         user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
                         friend_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
                         PRIMARY KEY (user_id, friend_id)
                     );
-        
+
                     CREATE TABLE IF NOT EXISTS feedback (
                         id SERIAL PRIMARY KEY,
                         user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
@@ -58,7 +48,7 @@ async def init_db():
                         text TEXT,
                         created_at TIMESTAMP DEFAULT NOW()
                     );
-        
+
                     CREATE TABLE IF NOT EXISTS friend_requests (
                         id SERIAL PRIMARY KEY,
                         from_user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
@@ -67,19 +57,13 @@ async def init_db():
                         created_at TIMESTAMP DEFAULT NOW(),
                         UNIQUE(from_user_id, to_user_id)
                     );
+
                     CREATE TABLE IF NOT EXISTS reservations (
                         id SERIAL PRIMARY KEY,
                         gift_id INTEGER REFERENCES wishlist(id) ON DELETE CASCADE,
                         reserved_by BIGINT REFERENCES users(id) ON DELETE CASCADE,
                         reserved_at TIMESTAMP DEFAULT NOW(),
                         UNIQUE(gift_id, reserved_by)
-                    );
-                    CREATE TABLE IF NOT EXISTS notifications (
-                        id SERIAL PRIMARY KEY,
-                        user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
-                        message TEXT,
-                        created_at TIMESTAMP DEFAULT NOW(),
-                        is_read BOOLEAN DEFAULT FALSE
                     );
                 ''')
             return
@@ -89,12 +73,10 @@ async def init_db():
                 raise
             await asyncio.sleep(2 ** attempt)
 
-
 def get_pool():
     if pool is None:
         raise RuntimeError("Database pool has not been initialized")
     return pool
-
 
 async def register_user(user):
     pool = get_pool()
@@ -105,33 +87,6 @@ async def register_user(user):
             ON CONFLICT (id) DO NOTHING;
         ''', user.id, user.username, user.first_name)
 
-
-async def update_product_info(pool, gift_id, link):
-    """Обновляет информацию о товаре"""
-    from parsers import parse_product_info
-
-    try:
-        print(f"Начало парсинга товара {gift_id}: {link}")
-        product_info = await parse_product_info(link)
-
-        if product_info:
-            title, price, domain = product_info
-            print(f"Получены данные: {title}, {price}, {domain}")
-
-            async with pool.acquire() as conn:
-                await conn.execute('''
-                    UPDATE wishlist 
-                    SET title = $1, price = $2, domain = $3, parsed_at = NOW()
-                    WHERE id = $4
-                ''', title, price, domain, gift_id)
-                print(f"Данные для {gift_id} обновлены")
-        else:
-            print(f"Не удалось получить данные для {gift_id}")
-
-    except Exception as e:
-        print(f"Критическая ошибка при обновлении товара {gift_id}: {str(e)}")
-
-
 async def add_link_to_wishlist(user_id, link):
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -140,35 +95,27 @@ async def add_link_to_wishlist(user_id, link):
             VALUES ($1, $2)
             RETURNING id;
         ''', user_id, link)
-
-        # Запускаем парсинг с передачей pool
-        asyncio.create_task(update_product_info(pool, record['id'], link))
-
         return record['id']
-
 
 async def get_user_wishlist(user_id):
     pool = get_pool()
     async with pool.acquire() as conn:
         return await conn.fetch('''
-            SELECT id, link, title, price, domain 
+            SELECT id, link 
             FROM wishlist 
             WHERE user_id = $1
             ORDER BY id
         ''', user_id)
-
 
 async def delete_gift_by_id(gift_id: int):
     pool = get_pool()
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM wishlist WHERE id = $1", gift_id)
 
-
 async def get_user_by_id(user_id: int):
     pool = get_pool()
     async with pool.acquire() as conn:
         return await conn.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
-
 
 async def get_friends(user_id: int):
     pool = get_pool()
@@ -180,24 +127,20 @@ async def get_friends(user_id: int):
             WHERE f.user_id = $1
         ''', user_id)
 
-
 async def remove_friend(user_id: int, friend_id: int):
     pool = get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # Удаляем дружбу из таблицы friends
             await conn.execute('''
                 DELETE FROM friends 
                 WHERE (user_id = $1 AND friend_id = $2) 
                 OR (user_id = $2 AND friend_id = $1)
             ''', user_id, friend_id)
-            # Удаляем все связанные запросы из friend_requests
             await conn.execute('''
                 DELETE FROM friend_requests 
                 WHERE (from_user_id = $1 AND to_user_id = $2) 
                 OR (from_user_id = $2 AND to_user_id = $1)
             ''', user_id, friend_id)
-
 
 async def add_feedback(user_id: int, username: str, text: str):
     pool = get_pool()
@@ -207,11 +150,9 @@ async def add_feedback(user_id: int, username: str, text: str):
             VALUES ($1, $2, $3);
         ''', user_id, username, text)
 
-
 async def create_friend_request(from_user_id: int, to_user_id: int) -> bool:
     pool = get_pool()
     async with pool.acquire() as conn:
-        # Проверяем существование запроса или дружбы
         exists = await conn.fetchval('''
             SELECT EXISTS(
                 SELECT 1 FROM friend_requests 
@@ -233,7 +174,6 @@ async def create_friend_request(from_user_id: int, to_user_id: int) -> bool:
         ''', from_user_id, to_user_id)
         return True
 
-
 async def update_friend_request(from_user_id: int, to_user_id: int, status: str) -> bool:
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -249,21 +189,18 @@ async def update_friend_request(from_user_id: int, to_user_id: int, status: str)
                 return False
 
             if status == 'accept':
-                # Добавляем взаимную дружбу
                 await conn.execute('''
                     INSERT INTO friends (user_id, friend_id) 
                     VALUES ($1, $2), ($2, $1)
                     ON CONFLICT DO NOTHING
                 ''', from_user_id, to_user_id)
 
-            # Удаляем запрос после обработки
             await conn.execute('''
                 DELETE FROM friend_requests 
                 WHERE id = $1
             ''', request['id'])
 
             return True
-
 
 async def get_pending_requests(to_user_id: int):
     pool = get_pool()
@@ -274,7 +211,6 @@ async def get_pending_requests(to_user_id: int):
             JOIN users u ON fr.from_user_id = u.id
             WHERE fr.to_user_id = $1 AND fr.status = 'pending'
         ''', to_user_id)
-
 
 async def check_friendship(user_id1: int, user_id2: int) -> bool:
     pool = get_pool()
@@ -287,21 +223,16 @@ async def check_friendship(user_id1: int, user_id2: int) -> bool:
             )
         ''', user_id1, user_id2)
 
-
-# Новые функции для работы с бронированиями:
 async def reserve_gift(gift_id: int, user_id: int):
     pool = get_pool()
     async with pool.acquire() as conn:
-        # Проверяем, существует ли подарок
         gift = await conn.fetchrow('SELECT user_id FROM wishlist WHERE id = $1', gift_id)
         if not gift:
             return False
 
-        # Нельзя забронировать свой подарок
         if gift['user_id'] == user_id:
             return False
 
-        # Проверяем, не забронирован ли уже
         existing = await conn.fetchrow(
             'SELECT 1 FROM reservations WHERE gift_id = $1',
             gift_id
@@ -315,7 +246,6 @@ async def reserve_gift(gift_id: int, user_id: int):
         )
         return True
 
-
 async def cancel_reservation(gift_id: int, user_id: int):
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -324,7 +254,6 @@ async def cancel_reservation(gift_id: int, user_id: int):
             gift_id, user_id
         )
         return result != 'DELETE 0'
-
 
 async def get_reservation_info(gift_id: int):
     pool = get_pool()
@@ -336,26 +265,11 @@ async def get_reservation_info(gift_id: int):
             gift_id
         )
 
-
-async def get_user_reservations(user_id: int):
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        return await conn.fetch(
-            'SELECT r.*, w.link, u.first_name, u.username FROM reservations r '
-            'JOIN wishlist w ON r.gift_id = w.id '
-            'JOIN users u ON w.user_id = u.id '
-            'WHERE r.reserved_by = $1',
-            user_id
-        )
-
-
 async def check_old_reservations():
-    """Автоматически удаляет бронирования старше 10 дней"""
     pool = get_pool()
     async with pool.acquire() as conn:
         old_reservations = await conn.fetch(
-            'SELECT r.id, r.gift_id, w.user_id, w.link FROM reservations r '
-            'JOIN wishlist w ON r.gift_id = w.id '
+            'SELECT r.id FROM reservations r '
             'WHERE r.reserved_at < NOW() - INTERVAL \'10 days\''
         )
 
@@ -365,16 +279,4 @@ async def check_old_reservations():
                 reservation['id']
             )
 
-            # Уведомляем владельца подарка
-            try:
-                await conn.execute(
-                    'INSERT INTO notifications (user_id, message) '
-                    'VALUES ($1, $2)',
-                    reservation['user_id'],
-                    f'Бронирование подарка {reservation["link"]} автоматически отменено (прошло 10 дней)'
-                )
-            except Exception:
-                pass
-
         return len(old_reservations)
-

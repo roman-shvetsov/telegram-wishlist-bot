@@ -15,7 +15,7 @@ from telegram.ext import (
     filters
 )
 from telegram.constants import ParseMode
-from telegram.error import TimedOut
+from telegram.error import TimedOut, Forbidden
 from telegram.request import HTTPXRequest
 from db import (
     init_db,
@@ -35,14 +35,12 @@ from db import (
     reserve_gift,
     cancel_reservation,
     get_reservation_info,
-    get_user_reservations,
     check_old_reservations
 )
 from config import TELEGRAM_TOKEN, ADMIN_ID
 import asyncio
-import httpx
 import logging
-from aiohttp import web
+import asyncpg  # Добавляем для обработки UniqueViolationError
 
 # Настройка логирования
 logging.basicConfig(
@@ -142,13 +140,7 @@ async def show_user_wishlist(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     for gift in wishlist:
         gift_link = gift['link']
-        title = gift.get('title', 'Без названия')
-        price = gift.get('price', 'Цена не указана')
-
-        message_text = f"🎁 *{title}*\n"
-        if price != 'Цена не указана':
-            message_text += f"💰 *Цена:* {price}\n"
-        message_text += f"🔗 [Ссылка на товар]({gift_link})"
+        message_text = f"🎁 [Ссылка на товар]({gift_link})"
 
         if is_own_list:
             reservation = await get_reservation_info(gift['id'])
@@ -182,40 +174,6 @@ async def show_user_wishlist(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 parse_mode=ParseMode.MARKDOWN,
                 disable_web_page_preview=False
             )
-
-async def update_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"Received /update_prices command from user {update.effective_user.id}")
-    user_id = update.effective_user.id
-    wishlist = await get_user_wishlist(user_id)
-
-    if not wishlist:
-        await update.message.reply_text("У вас пока нет подарков в списке.")
-        return
-
-    msg = await update.message.reply_text("⏳ Начинаю обновление цен...")
-
-    updated_count = 0
-    from parsers import parse_product_info
-
-    for gift in wishlist:
-        try:
-            product_info = await parse_product_info(gift['link'])
-            if product_info:
-                title, price, domain = product_info
-
-                pool = get_pool()
-                async with pool.acquire() as conn:
-                    await conn.execute('''
-                        UPDATE wishlist 
-                        SET title = $1, price = $2, domain = $3, parsed_at = NOW()
-                        WHERE id = $4
-                    ''', title, price, domain, gift['id'])
-
-                updated_count += 1
-        except Exception as e:
-            logger.error(f"Ошибка при обновлении товара {gift['id']}: {e}")
-
-    await msg.edit_text(f"✅ Обновлено {updated_count} из {len(wishlist)} подарков!")
 
 async def show_gifts_to_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wishlist = await get_user_wishlist(update.effective_user.id)
@@ -290,9 +248,25 @@ async def handle_user_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    if not await create_friend_request(update.effective_user.id, selected_user_id):
+    # Проверяем, есть ли существующий запрос
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        existing_request = await conn.fetchrow(
+            'SELECT * FROM friend_requests WHERE from_user_id = $1 AND to_user_id = $2 AND status = $3',
+            update.effective_user.id, selected_user_id, 'pending'
+        )
+        if existing_request:
+            await update.message.reply_text(
+                "Вы уже отправили запрос этому пользователю 😊",
+                reply_markup=main_keyboard()
+            )
+            return
+
+    # Создаем запрос в друзья
+    success = await create_friend_request(update.effective_user.id, selected_user_id)
+    if not success:
         await update.message.reply_text(
-            "Вы уже отправили запрос этому пользователю 😊",
+            "Не удалось создать запрос в друзья. Возможно, запрос уже существует.",
             reply_markup=main_keyboard()
         )
         return
@@ -310,14 +284,32 @@ async def handle_user_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
             text=f"👋 Пользователь {update.effective_user.first_name} хочет добавить вас в друзья!",
             reply_markup=request_keyboard
         )
-
         await update.message.reply_text(
             "Запрос в друзья успешно отправлен!",
             reply_markup=main_keyboard()
         )
-    except Exception:
+    except Forbidden as e:
+        logger.error(f"Ошибка: пользователь {selected_user_id} заблокировал бота: {e}")
+        # Удаляем запрос из базы, если не удалось отправить сообщение
+        async with pool.acquire() as conn:
+            await conn.execute(
+                'DELETE FROM friend_requests WHERE from_user_id = $1 AND to_user_id = $2 AND status = $3',
+                update.effective_user.id, selected_user_id, 'pending'
+            )
         await update.message.reply_text(
-            "Не удалось отправить запрос. Возможно, пользователь заблокировал бота.",
+            "Не удалось отправить запрос. Пользователь, возможно, заблокировал бота.",
+            reply_markup=main_keyboard()
+        )
+    except Exception as e:
+        logger.error(f"Ошибка при отправке запроса в друзья пользователю {selected_user_id}: {e}")
+        # Удаляем запрос из базы при любой другой ошибке
+        async with pool.acquire() as conn:
+            await conn.execute(
+                'DELETE FROM friend_requests WHERE from_user_id = $1 AND to_user_id = $2 AND status = $3',
+                update.effective_user.id, selected_user_id, 'pending'
+            )
+        await update.message.reply_text(
+            "Произошла ошибка при отправке запроса. Попробуйте позже.",
             reply_markup=main_keyboard()
         )
 
@@ -381,18 +373,24 @@ async def handle_friend_request_response(update: Update, context: ContextTypes.D
         await query.edit_message_text(
             f"✅ Вы приняли запрос в друзья от {from_user['first_name']} (@{from_user['username']})!"
         )
-
         try:
             await context.bot.send_message(
                 chat_id=from_user_id,
                 text=f"🎉 Пользователь {to_user['first_name']} (@{to_user['username']}) принял ваш запрос в друзья!"
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Ошибка при отправке уведомления о принятии дружбы пользователю {from_user_id}: {e}")
     else:
         await query.edit_message_text(
             f"❌ Вы отклонили запрос в друзья от {from_user['first_name']} (@{from_user['username']})"
         )
+        try:
+            await context.bot.send_message(
+                chat_id=from_user_id,
+                text=f"😢 Пользователь {to_user['first_name']} (@{to_user['username']}) отклонил ваш запрос в друзья."
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при отправке уведомления об отклонении дружбы пользователю {from_user_id}: {e}")
 
 async def check_reservations_periodically(context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -425,13 +423,7 @@ async def handle_friend_callback(update: Update, context: ContextTypes.DEFAULT_T
             current_user_id = query.from_user.id
             for gift in wishlist:
                 gift_link = gift['link']
-                title = gift.get('title', 'Без названия')
-                price = gift.get('price', 'Цена не указана')
-
-                message_text = f"🎁 *{title}*\n"
-                if price != 'Цена не указана':
-                    message_text += f"💰 *Цена:* {price}\n"
-                message_text += f"🔗 [Ссылка на товар]({gift_link})"
+                message_text = f"🎁 [Ссылка на товар]({gift_link})"
 
                 reservation = await get_reservation_info(gift['id'])
                 if reservation:
@@ -463,7 +455,7 @@ async def handle_friend_callback(update: Update, context: ContextTypes.DEFAULT_T
             pool = get_pool()
             async with pool.acquire() as conn:
                 gift_info = await conn.fetchrow(
-                    'SELECT w.link, w.title, w.price, w.user_id as owner_id, u.first_name '
+                    'SELECT w.link, w.user_id as owner_id, u.first_name '
                     'FROM wishlist w '
                     'JOIN users u ON w.user_id = u.id '
                     'WHERE w.id = $1',
@@ -475,8 +467,6 @@ async def handle_friend_callback(update: Update, context: ContextTypes.DEFAULT_T
                 return
 
             gift_link = gift_info['link']
-            title = gift_info.get('title', 'Без названия')
-            price = gift_info.get('price', 'Цена не указана')
 
             if gift_info['owner_id'] == user_id:
                 await query.edit_message_text("Нельзя забронировать свой собственный подарок 😊")
@@ -485,9 +475,6 @@ async def handle_friend_callback(update: Update, context: ContextTypes.DEFAULT_T
             if await reserve_gift(gift_id, user_id):
                 try:
                     message_text = f"🎉 <b>Кто-то хочет подарить вам этот подарок!</b>\n\n"
-                    message_text += f"🎁 <b>{title}</b>\n"
-                    if price != 'Цена не указана':
-                        message_text += f"💰 <b>Цена:</b> {price}\n"
                     message_text += f"🔗 <a href=\"{gift_link}\">Ссылка на товар</a>\n\n"
                     message_text += "Теперь другие не смогут его забронировать!"
 
@@ -501,9 +488,6 @@ async def handle_friend_callback(update: Update, context: ContextTypes.DEFAULT_T
                     logger.error(f"Ошибка при уведомлении владельца: {e}")
 
                 message_text = f"✅ <b>Вы забронировали этот подарок!</b>\n\n"
-                message_text += f"🎁 <b>{title}</b>\n"
-                if price != 'Цена не указана':
-                    message_text += f"💰 <b>Цена:</b> {price}\n"
                 message_text += f"🔗 <a href=\"{gift_link}\">Ссылка на товар</a>\n\n"
                 message_text += "Теперь другие не смогут его выбрать. Не забудьте подарить его в течение 10 дней!"
 
@@ -528,7 +512,7 @@ async def handle_friend_callback(update: Update, context: ContextTypes.DEFAULT_T
             pool = get_pool()
             async with pool.acquire() as conn:
                 gift_info = await conn.fetchrow(
-                    'SELECT w.link, w.title, w.price, w.user_id as owner_id, u.first_name '
+                    'SELECT w.link, w.user_id as owner_id, u.first_name '
                     'FROM wishlist w '
                     'JOIN users u ON w.user_id = u.id '
                     'WHERE w.id = $1',
@@ -540,15 +524,10 @@ async def handle_friend_callback(update: Update, context: ContextTypes.DEFAULT_T
                 return
 
             gift_link = gift_info['link']
-            title = gift_info.get('title', 'Без названия')
-            price = gift_info.get('price', 'Цена не указана')
 
             if await cancel_reservation(gift_id, user_id):
                 try:
                     message_text = f"😢 <b>Кто-то передумал дарить вам этот подарок</b>\n\n"
-                    message_text += f"🎁 <b>{title}</b>\n"
-                    if price != 'Цена не указана':
-                        message_text += f"💰 <b>Цена:</b> {price}\n"
                     message_text += f"🔗 <a href=\"{gift_link}\">Ссылка на товар</a>\n\n"
                     message_text += "Теперь его снова можно забронировать!"
 
@@ -562,9 +541,6 @@ async def handle_friend_callback(update: Update, context: ContextTypes.DEFAULT_T
                     logger.error(f"Ошибка при уведомлении владельца: {e}")
 
                 message_text = f"❌ <b>Вы отменили бронирование подарка</b>\n\n"
-                message_text += f"🎁 <b>{title}</b>\n"
-                if price != 'Цена не указана':
-                    message_text += f"💰 <b>Цена:</b> {price}\n"
                 message_text += f"🔗 <a href=\"{gift_link}\">Ссылка на товар</a>"
 
                 await query.edit_message_text(
@@ -583,26 +559,32 @@ async def handle_friend_callback(update: Update, context: ContextTypes.DEFAULT_T
 
         elif query.data.startswith("remove_friend:"):
             friend_id = int(query.data.split(":")[1])
-            await remove_friend(query.from_user.id, friend_id)
+            user_id = query.from_user.id
+            await remove_friend(user_id, friend_id)
 
             pool = get_pool()
             async with pool.acquire() as conn:
+                # Очищаем все связанные запросы в друзья
+                await conn.execute(
+                    'DELETE FROM friend_requests WHERE (from_user_id = $1 AND to_user_id = $2) OR (from_user_id = $2 AND to_user_id = $1)',
+                    user_id, friend_id
+                )
+                # Очищаем бронирования
                 gifts = await conn.fetch(
                     'SELECT w.id FROM wishlist w '
                     'JOIN reservations r ON w.id = r.gift_id '
                     'WHERE w.user_id = $1 AND r.reserved_by = $2',
-                    query.from_user.id, friend_id
+                    user_id, friend_id
                 )
-
                 friend_gifts = await conn.fetch(
                     'SELECT w.id FROM wishlist w '
                     'JOIN reservations r ON w.id = r.gift_id '
                     'WHERE w.user_id = $1 AND r.reserved_by = $2',
-                    friend_id, query.from_user.id
+                    friend_id, user_id
                 )
 
                 for gift in gifts + friend_gifts:
-                    await cancel_reservation(gift['id'], friend_id if gift in gifts else query.from_user.id)
+                    await cancel_reservation(gift['id'], friend_id if gift in gifts else user_id)
 
             await query.edit_message_text("Друг удалён из списка 💔")
 
@@ -708,14 +690,40 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if message.startswith("http"):
-        if await check_gift_limit(update.effective_user.id):
+        try:
+            if await check_gift_limit(update.effective_user.id):
+                await update.message.reply_text(
+                    "🚫 Вы достигли лимита в 15 подарков в вашем списке!",
+                    reply_markup=main_keyboard()
+                )
+                return
+            gift_id = await add_link_to_wishlist(update.effective_user.id, message)
+            logger.info(f"Successfully added gift with id {gift_id} for user {update.effective_user.id}")
+            await update.message.reply_text("Подарок добавлен в твой список! 👍")
+        except asyncpg.UniqueViolationError as e:
+            logger.error(f"UniqueViolationError while adding link to wishlist: {e}")
+            # Попробуем синхронизировать последовательность и повторить попытку
+            pool = get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute("SELECT setval('wishlist_id_seq', (SELECT MAX(id) FROM wishlist))")
+                logger.info("Synchronized wishlist_id_seq")
+                # Повторяем попытку добавления
+                try:
+                    gift_id = await add_link_to_wishlist(update.effective_user.id, message)
+                    logger.info(f"Successfully added gift with id {gift_id} for user {update.effective_user.id} after sequence sync")
+                    await update.message.reply_text("Подарок добавлен в твой список! 👍")
+                except Exception as e:
+                    logger.error(f"Failed to add link to wishlist after sequence sync: {e}")
+                    await update.message.reply_text(
+                        "Произошла ошибка при добавлении подарка. Попробуйте позже.",
+                        reply_markup=main_keyboard()
+                    )
+        except Exception as e:
+            logger.error(f"Error while adding link to wishlist: {e}")
             await update.message.reply_text(
-                "🚫 Вы достигли лимита в 15 подарков в вашем списке!",
+                "Произошла ошибка при добавлении подарка. Попробуйте позже.",
                 reply_markup=main_keyboard()
             )
-            return
-        await add_link_to_wishlist(update.effective_user.id, message)
-        await update.message.reply_text("Подарок добавлен в твой список! 👍")
         return
 
     await handle_buttons(update, context)
@@ -734,20 +742,16 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Ошибка отправки пользователю {user['id']}: {e}")
     await update.message.reply_text("Сообщение отправлено всем пользователям!")
 
-async def health_check(request: web.Request):
-    return web.Response(text="OK")
-
-async def run_health_endpoint():
-    web_app = web.Application()
-    web_app.router.add_get('/health', health_check)
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8080)
-    await site.start()
-    logger.info("Health endpoint started on port 8080")
-
 async def post_init(application):
     await init_db()
+    # Синхронизируем последовательность при старте бота
+    try:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("SELECT setval('wishlist_id_seq', (SELECT MAX(id) FROM wishlist))")
+            logger.info("Synchronized wishlist_id_seq at startup")
+    except Exception as e:
+        logger.error(f"Error synchronizing wishlist_id_seq at startup: {e}")
 
 def main():
     try:
@@ -775,7 +779,6 @@ def main():
         app.add_handler(CallbackQueryHandler(handle_friend_callback, pattern="^(show_wishlist|remove_friend|reserve|cancel_reserve):"))
         app.add_handler(CallbackQueryHandler(handle_friend_request_response, pattern="^friend_request:"))
         app.add_handler(MessageHandler(filters.StatusUpdate.USER_SHARED, handle_user_shared))
-        app.add_handler(CommandHandler("update_prices", update_prices))
         app.add_handler(CommandHandler("broadcast", broadcast))
 
         app.job_queue.run_repeating(
@@ -783,9 +786,6 @@ def main():
             interval=86400,
             first=10
         )
-
-        # Запуск health эндпоинта
-        asyncio.ensure_future(run_health_endpoint())
 
         logger.info("Запуск бота с Polling...")
         app.run_polling(drop_pending_updates=True)
