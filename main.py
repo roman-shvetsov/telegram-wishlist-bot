@@ -41,6 +41,8 @@ from config import TELEGRAM_TOKEN, ADMIN_ID
 import asyncio
 import logging
 import asyncpg
+import sys
+import os
 
 # Настройка логирования
 logging.basicConfig(
@@ -48,6 +50,10 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# Счетчик попыток перезапуска
+RESTART_ATTEMPTS = 0
+MAX_RESTART_ATTEMPTS = 3
 
 # Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -702,12 +708,10 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("Подарок добавлен в твой список! 👍")
         except asyncpg.UniqueViolationError as e:
             logger.error(f"UniqueViolationError while adding link to wishlist: {e}")
-            # Попробуем синхронизировать последовательность и повторить попытку
             pool = get_pool()
             async with pool.acquire() as conn:
                 await conn.execute("SELECT setval('wishlist_id_seq', (SELECT MAX(id) FROM wishlist))")
                 logger.info("Synchronized wishlist_id_seq")
-                # Повторяем попытку добавления
                 try:
                     gift_id = await add_link_to_wishlist(update.effective_user.id, message)
                     logger.info(f"Successfully added gift with id {gift_id} for user {update.effective_user.id} after sequence sync")
@@ -744,7 +748,6 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(application):
     await init_db()
-    # Синхронизируем последовательность при старте бота
     try:
         pool = get_pool()
         async with pool.acquire() as conn:
@@ -753,47 +756,63 @@ async def post_init(application):
     except Exception as e:
         logger.error(f"Error synchronizing wishlist_id_seq at startup: {e}")
 
+async def notify_admin(context: ContextTypes.DEFAULT_TYPE, message: str):
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"[Только для админа] {message}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        logger.error(f"Failed to notify admin: {e}")
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка ошибок приложения"""
+    global RESTART_ATTEMPTS
     logger.error(f"Update {update} caused error {context.error}")
+
     if isinstance(context.error, Conflict):
         logger.warning("Conflict detected: another bot instance is running. Attempting to recover...")
+        if RESTART_ATTEMPTS >= MAX_RESTART_ATTEMPTS:
+            logger.error("Max restart attempts reached. Stopping bot.")
+            await notify_admin(context, f"⚠️ Максимальное количество попыток перезапуска ({MAX_RESTART_ATTEMPTS}) достигнуто. Бот остановлен.")
+            sys.exit(1)
+
+        RESTART_ATTEMPTS += 1
         try:
-            await context.bot.delete_webhook()  # Удаляем webhook, если он был установлен
-            await asyncio.sleep(5)  # Ждем, чтобы дать время другим экземплярам завершиться
-            # Перезапускаем polling
-            await context.application.run_polling(drop_pending_updates=True)
+            await context.bot.delete_webhook()
+            logger.info("Webhook deleted successfully")
+            await context.application.stop()
+            logger.info("Application stopped")
+            await asyncio.sleep(5)
+            RESTART_ATTEMPTS = 0  # Сбрасываем счетчик после успешного перезапуска
+            logger.info("Attempting to restart polling...")
+            await context.application.run_polling(
+                drop_pending_updates=True,
+                poll_interval=1.0,
+                timeout=30
+            )
         except Exception as e:
             logger.error(f"Failed to recover from Conflict: {e}")
-            # Уведомляем админа
-            try:
-                await context.bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text=f"⚠️ Ошибка: конфликт getUpdates. Бот перезапускается: {e}"
-                )
-            except Exception as e:
-                logger.error(f"Failed to notify admin: {e}")
+            await notify_admin(context, f"⚠️ Ошибка: конфликт getUpdates. Не удалось перезапустить: {e}")
     elif isinstance(context.error, TimedOut):
         logger.warning("TimedOut detected. Retrying in 10 seconds...")
         try:
-            await asyncio.sleep(10)  # Ждем перед повторной попыткой
-            # Повторяем попытку polling
-            await context.application.run_polling(drop_pending_updates=True)
+            await asyncio.sleep(10)
+            await context.application.run_polling(
+                drop_pending_updates=True,
+                poll_interval=1.0,
+                timeout=30
+            )
         except Exception as e:
             logger.error(f"Failed to recover from TimedOut: {e}")
-            try:
-                await context.bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text=f"⚠️ Ошибка: TimedOut при запросе к Telegram API. Попытка переподключения: {e}"
-                )
-            except Exception as e:
-                logger.error(f"Failed to notify admin: {e}")
+            await notify_admin(context, f"⚠️ Ошибка: TimedOut при запросе к Telegram API. Попытка переподключения не удалась: {e}")
 
 def main():
     try:
         http_request = HTTPXRequest(
-            connection_pool_size=100,
-            read_timeout=30.0,  # Увеличен таймаут для уменьшения TimedOut
+            connection_pool_size=50,  # Уменьшено для меньшей нагрузки
+            read_timeout=30.0,
             write_timeout=10.0,
             connect_timeout=10.0,
             pool_timeout=30.0
@@ -825,12 +844,17 @@ def main():
         )
 
         logger.info("Запуск бота с Polling...")
-        app.run_polling(drop_pending_updates=True)
+        app.run_polling(
+            drop_pending_updates=True,
+            poll_interval=1.0,  # Увеличен интервал для стабильности
+            timeout=30
+        )
 
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}")
+        asyncio.run(notify_admin(None, f"⚠️ Критическая ошибка при запуске бота: {e}"))
         asyncio.run(asyncio.sleep(10))
-        raise
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
