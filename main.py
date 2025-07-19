@@ -41,8 +41,8 @@ from config import TELEGRAM_TOKEN, ADMIN_ID
 import asyncio
 import logging
 import asyncpg
-import sys
 import os
+import time
 
 # Настройка логирования
 logging.basicConfig(
@@ -51,9 +51,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Счетчик попыток перезапуска
+# Счетчик попыток перезапуска и таймер для уведомлений
 RESTART_ATTEMPTS = 0
 MAX_RESTART_ATTEMPTS = 3
+LAST_NOTIFICATION_TIME = 0
+NOTIFICATION_COOLDOWN = 300  # 5 минут в секундах
 
 # Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -254,7 +256,6 @@ async def handle_user_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    # Проверяем, есть ли существующий запрос
     pool = get_pool()
     async with pool.acquire() as conn:
         existing_request = await conn.fetchrow(
@@ -268,7 +269,6 @@ async def handle_user_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             return
 
-    # Создаем запрос в друзья
     success = await create_friend_request(update.effective_user.id, selected_user_id)
     if not success:
         await update.message.reply_text(
@@ -296,7 +296,6 @@ async def handle_user_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
     except Forbidden as e:
         logger.error(f"Ошибка: пользователь {selected_user_id} заблокировал бота: {e}")
-        # Удаляем запрос из базы, если не удалось отправить сообщение
         async with pool.acquire() as conn:
             await conn.execute(
                 'DELETE FROM friend_requests WHERE from_user_id = $1 AND to_user_id = $2 AND status = $3',
@@ -308,7 +307,6 @@ async def handle_user_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
     except Exception as e:
         logger.error(f"Ошибка при отправке запроса в друзья пользователю {selected_user_id}: {e}")
-        # Удаляем запрос из базы при любой другой ошибке
         async with pool.acquire() as conn:
             await conn.execute(
                 'DELETE FROM friend_requests WHERE from_user_id = $1 AND to_user_id = $2 AND status = $3',
@@ -570,12 +568,10 @@ async def handle_friend_callback(update: Update, context: ContextTypes.DEFAULT_T
 
             pool = get_pool()
             async with pool.acquire() as conn:
-                # Очищаем все связанные запросы в друзья
                 await conn.execute(
                     'DELETE FROM friend_requests WHERE (from_user_id = $1 AND to_user_id = $2) OR (from_user_id = $2 AND to_user_id = $1)',
                     user_id, friend_id
                 )
-                # Очищаем бронирования
                 gifts = await conn.fetch(
                     'SELECT w.id FROM wishlist w '
                     'JOIN reservations r ON w.id = r.gift_id '
@@ -757,17 +753,22 @@ async def post_init(application):
         logger.error(f"Error synchronizing wishlist_id_seq at startup: {e}")
 
 async def notify_admin(context: ContextTypes.DEFAULT_TYPE, message: str):
+    global LAST_NOTIFICATION_TIME
+    current_time = time.time()
+    if current_time - LAST_NOTIFICATION_TIME < NOTIFICATION_COOLDOWN:
+        logger.info("Skipping admin notification due to cooldown")
+        return
     try:
         await context.bot.send_message(
             chat_id=ADMIN_ID,
             text=f"[Только для админа] {message}",
             parse_mode=ParseMode.MARKDOWN
         )
+        LAST_NOTIFICATION_TIME = current_time
     except Exception as e:
         logger.error(f"Failed to notify admin: {e}")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка ошибок приложения"""
     global RESTART_ATTEMPTS
     logger.error(f"Update {update} caused error {context.error}")
 
@@ -776,8 +777,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if RESTART_ATTEMPTS >= MAX_RESTART_ATTEMPTS:
             logger.error("Max restart attempts reached. Stopping bot.")
             await notify_admin(context, f"⚠️ Максимальное количество попыток перезапуска ({MAX_RESTART_ATTEMPTS}) достигнуто. Бот остановлен.")
-            sys.exit(1)
-
+            os._exit(0)  # Завершаем процесс, чтобы Render перезапустил
         RESTART_ATTEMPTS += 1
         try:
             await context.bot.delete_webhook()
@@ -785,33 +785,37 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.application.stop()
             logger.info("Application stopped")
             await asyncio.sleep(5)
-            RESTART_ATTEMPTS = 0  # Сбрасываем счетчик после успешного перезапуска
+            RESTART_ATTEMPTS = 0
             logger.info("Attempting to restart polling...")
+            await context.application.start()
             await context.application.run_polling(
                 drop_pending_updates=True,
-                poll_interval=1.0,
+                poll_interval=2.0,  # Увеличен интервал
                 timeout=30
             )
         except Exception as e:
             logger.error(f"Failed to recover from Conflict: {e}")
             await notify_admin(context, f"⚠️ Ошибка: конфликт getUpdates. Не удалось перезапустить: {e}")
+            os._exit(0)  # Завершаем процесс, чтобы Render перезапустил
     elif isinstance(context.error, TimedOut):
         logger.warning("TimedOut detected. Retrying in 10 seconds...")
         try:
             await asyncio.sleep(10)
+            await context.application.start()
             await context.application.run_polling(
                 drop_pending_updates=True,
-                poll_interval=1.0,
+                poll_interval=2.0,
                 timeout=30
             )
         except Exception as e:
             logger.error(f"Failed to recover from TimedOut: {e}")
             await notify_admin(context, f"⚠️ Ошибка: TimedOut при запросе к Telegram API. Попытка переподключения не удалась: {e}")
+            os._exit(0)
 
 def main():
     try:
         http_request = HTTPXRequest(
-            connection_pool_size=50,  # Уменьшено для меньшей нагрузки
+            connection_pool_size=50,
             read_timeout=30.0,
             write_timeout=10.0,
             connect_timeout=10.0,
@@ -825,7 +829,6 @@ def main():
             .get_updates_request(http_request) \
             .build()
 
-        # Регистрация обработчиков
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("terms", terms))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
@@ -846,7 +849,7 @@ def main():
         logger.info("Запуск бота с Polling...")
         app.run_polling(
             drop_pending_updates=True,
-            poll_interval=1.0,  # Увеличен интервал для стабильности
+            poll_interval=2.0,  # Увеличен интервал
             timeout=30
         )
 
@@ -854,7 +857,7 @@ def main():
         logger.error(f"Критическая ошибка: {e}")
         asyncio.run(notify_admin(None, f"⚠️ Критическая ошибка при запуске бота: {e}"))
         asyncio.run(asyncio.sleep(10))
-        sys.exit(1)
+        os._exit(0)
 
 if __name__ == "__main__":
     main()
