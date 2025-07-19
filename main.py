@@ -15,7 +15,7 @@ from telegram.ext import (
     filters
 )
 from telegram.constants import ParseMode
-from telegram.error import TimedOut, Forbidden
+from telegram.error import TimedOut, Forbidden, Conflict
 from telegram.request import HTTPXRequest
 from db import (
     init_db,
@@ -40,7 +40,7 @@ from db import (
 from config import TELEGRAM_TOKEN, ADMIN_ID
 import asyncio
 import logging
-import asyncpg  # Добавляем для обработки UniqueViolationError
+import asyncpg
 
 # Настройка логирования
 logging.basicConfig(
@@ -753,11 +753,47 @@ async def post_init(application):
     except Exception as e:
         logger.error(f"Error synchronizing wishlist_id_seq at startup: {e}")
 
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ошибок приложения"""
+    logger.error(f"Update {update} caused error {context.error}")
+    if isinstance(context.error, Conflict):
+        logger.warning("Conflict detected: another bot instance is running. Attempting to recover...")
+        try:
+            await context.bot.delete_webhook()  # Удаляем webhook, если он был установлен
+            await asyncio.sleep(5)  # Ждем, чтобы дать время другим экземплярам завершиться
+            # Перезапускаем polling
+            await context.application.run_polling(drop_pending_updates=True)
+        except Exception as e:
+            logger.error(f"Failed to recover from Conflict: {e}")
+            # Уведомляем админа
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=f"⚠️ Ошибка: конфликт getUpdates. Бот перезапускается: {e}"
+                )
+            except Exception as e:
+                logger.error(f"Failed to notify admin: {e}")
+    elif isinstance(context.error, TimedOut):
+        logger.warning("TimedOut detected. Retrying in 10 seconds...")
+        try:
+            await asyncio.sleep(10)  # Ждем перед повторной попыткой
+            # Повторяем попытку polling
+            await context.application.run_polling(drop_pending_updates=True)
+        except Exception as e:
+            logger.error(f"Failed to recover from TimedOut: {e}")
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=f"⚠️ Ошибка: TimedOut при запросе к Telegram API. Попытка переподключения: {e}"
+                )
+            except Exception as e:
+                logger.error(f"Failed to notify admin: {e}")
+
 def main():
     try:
         http_request = HTTPXRequest(
             connection_pool_size=100,
-            read_timeout=20.0,
+            read_timeout=30.0,  # Увеличен таймаут для уменьшения TimedOut
             write_timeout=10.0,
             connect_timeout=10.0,
             pool_timeout=30.0
@@ -780,6 +816,7 @@ def main():
         app.add_handler(CallbackQueryHandler(handle_friend_request_response, pattern="^friend_request:"))
         app.add_handler(MessageHandler(filters.StatusUpdate.USER_SHARED, handle_user_shared))
         app.add_handler(CommandHandler("broadcast", broadcast))
+        app.add_error_handler(error_handler)
 
         app.job_queue.run_repeating(
             callback=check_reservations_periodically,
@@ -792,7 +829,7 @@ def main():
 
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}")
-        asyncio.run(asyncio.sleep(5))
+        asyncio.run(asyncio.sleep(10))
         raise
 
 if __name__ == "__main__":
